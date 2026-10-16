@@ -1,0 +1,7 @@
+**/__pycache__/
+*.pyc
+*.bak
+models/SenseVoiceSmall/model.pt
+data/
+tmp/
+.git/

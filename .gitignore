@@ -1,0 +1,30 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Caches
+.pytest_cache/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Temporary files & logs
+tmp/
+data/
+*.log
+*.swp
+*~
+
+# Models (large model weights)
+*.pt
+*.bin
+
+# OS generated
+.DS_Store
+Thumbs.db
