@@ -1,13 +1,19 @@
 import os
 import uuid
 import edge_tts
-import edge_tts.communicate as cm
-from edge_tts.constants import TRUSTED_CLIENT_TOKEN
 from datetime import datetime
 from core.providers.tts.base import TTSProviderBase
 
-# 覆蓋微軟 2026 已棄用的舊端點，使用官方新端點
-cm.WSS_URL = f"wss://api.msedgeservices.com/tts/cognitiveservices/websocket/v1?Ocp-Apim-Subscription-Key={TRUSTED_CLIENT_TOKEN}"
+# 微軟 2026-10 起棄用舊端點 (speech.platform.bing.com) 返回 403。
+# 官方已於 requirements.txt 升級至 edge-tts>=7.3.1。
+# 為防範 Docker 映像檔尚未重新打包升級（仍為 7.2.x 版），在此加入動態版本防護：
+if getattr(edge_tts, "__version__", "0") < "7.3.0":
+    import edge_tts.communicate as _cm
+    from edge_tts.constants import TRUSTED_CLIENT_TOKEN as _TOKEN
+    _NEW_WSS = f"wss://api.msedgeservices.com/tts/cognitiveservices/websocket/v1?Ocp-Apim-Subscription-Key={_TOKEN}"
+    _cm.WSS_URL = _NEW_WSS
+    if hasattr(edge_tts, "constants"):
+        edge_tts.constants.WSS_URL = _NEW_WSS
 
 
 class TTSProvider(TTSProviderBase):
