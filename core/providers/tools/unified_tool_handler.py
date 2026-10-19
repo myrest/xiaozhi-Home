@@ -91,7 +91,7 @@ class UnifiedToolHandler:
                 and "你的" not in mcp_endpoint_url
                 and mcp_endpoint_url != "null"
             ):
-                self.logger.info(f"正在初始化MCP接入点: {mcp_endpoint_url}")
+                self.logger.info("正在初始化MCP接入点")
                 mcp_endpoint_client = await connect_mcp_endpoint(
                     mcp_endpoint_url, self.conn
                 )
@@ -104,7 +104,7 @@ class UnifiedToolHandler:
                     self.logger.warning("MCP接入点初始化失败")
 
         except Exception as e:
-            self.logger.error(f"初始化MCP接入点失败: {e}")
+            self.logger.error(f"初始化MCP接入点失败: {type(e).__name__}")
 
     def _initialize_home_assistant(self):
         """初始化Home Assistant提示词"""
