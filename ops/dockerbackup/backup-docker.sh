@@ -92,24 +92,29 @@ for path in /home/roytai/xiaozhi/state /home/roytai/aiTrade /home/roytai/aiTrade
   [ -e "$path" ] && TAR_TARGETS+=("$path")
 done
 (
-  tar --warning=no-file-ignored --warning=no-file-changed --warning=no-file-removed --numeric-owner -cpf - \
-    --exclude='*.sock' \
-    --exclude='*/.git' \
-    --exclude='*/.venv' \
-    --exclude='*/node_modules' \
-    --exclude='*/.npm' \
-    --exclude='*/.codegraph' \
-    --exclude='/home/roytai/.wrangler/logs' \
-    --exclude='/home/roytai/.wrangler/registry' \
-    --exclude='*/__pycache__' \
-    --exclude='*/.pytest_cache' \
-    --exclude='*/.cache' \
-    --exclude='/home/roytai/.hermes/cache' \
-    --exclude='*/state/models/SenseVoiceSmall/model.pt' \
-    --exclude='*/state/mysql/data' \
-    --exclude='*/state/server/data/powermem_dev.db*' \
-    --exclude='*/state/mcp/playback/playback.sqlite3*' \
-    "${TAR_TARGETS[@]}" || [ $? -eq 1 ]
+  # Archive as container root so private runtime files remain restorable.
+  docker run --rm --network none \
+    --mount type=bind,src=/home/roytai,dst=/home/roytai,readonly \
+    --entrypoint /usr/bin/tar \
+    mysql@sha256:9d48c42f8341068f199116dfccb919b607c99765b5c61e549a548a43033471a4 \
+    --warning=no-file-ignored --warning=no-file-changed --warning=no-file-removed --numeric-owner -cpf - \
+      --exclude='*.sock' \
+      --exclude='*/.git' \
+      --exclude='*/.venv' \
+      --exclude='*/node_modules' \
+      --exclude='*/.npm' \
+      --exclude='*/.codegraph' \
+      --exclude='/home/roytai/.wrangler/logs' \
+      --exclude='/home/roytai/.wrangler/registry' \
+      --exclude='*/__pycache__' \
+      --exclude='*/.pytest_cache' \
+      --exclude='*/.cache' \
+      --exclude='/home/roytai/.hermes/cache' \
+      --exclude='*/state/models/SenseVoiceSmall/model.pt' \
+      --exclude='*/state/mysql/data' \
+      --exclude='*/state/server/data/powermem_dev.db*' \
+      --exclude='*/state/mcp/playback/playback.sqlite3*' \
+      "${TAR_TARGETS[@]}"
 ) | zstd -T0 > "$ARCHIVE_FILE"
 if [ ! -s "$DB_DIR/mysql_xiaozhi_users.sql" ] \
   || ! zstd -t "$DB_DIR/mysql_xiaozhi_databases.sql.zst" >/dev/null \
