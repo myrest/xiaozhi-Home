@@ -36,7 +36,7 @@ if ! docker ps --format '{{.Names}}' | grep -q '^xiaozhi-esp32-server-db$'; then
   echo "錯誤: MySQL 容器 xiaozhi-esp32-server-db 未運行，備份中止。" >&2
   exit 1
 fi
-if ! docker exec xiaozhi-esp32-server-db sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD missing}" exec mysqldump -uroot --databases xiaozhi_esp32_server voiceprint_db --single-transaction --routines --triggers --events' | zstd -T0 > "$DB_DIR/mysql_xiaozhi_databases.sql.zst"; then
+if ! docker exec xiaozhi-esp32-server-db sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD missing}" exec mysqldump -uroot --set-gtid-purged=OFF --databases xiaozhi_esp32_server voiceprint_db --single-transaction --routines --triggers --events' | zstd -T0 > "$DB_DIR/mysql_xiaozhi_databases.sql.zst"; then
   echo "錯誤: MySQL dump 失敗。" >&2
   exit 1
 fi
