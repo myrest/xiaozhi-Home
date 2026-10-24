@@ -93,7 +93,8 @@ for path in /home/roytai/xiaozhi/state /home/roytai/aiTrade /home/roytai/aiTrade
 done
 (
   # Archive as container root so private runtime files remain restorable.
-  docker run --rm --network none \
+  # GNU tar returns 1 when live files change during the snapshot.
+  if docker run --rm --network none \
     --mount type=bind,src=/home/roytai,dst=/home/roytai,readonly \
     --entrypoint /usr/bin/tar \
     mysql@sha256:9d48c42f8341068f199116dfccb919b607c99765b5c61e549a548a43033471a4 \
@@ -114,7 +115,12 @@ done
       --exclude='*/state/mysql/data' \
       --exclude='*/state/server/data/powermem_dev.db*' \
       --exclude='*/state/mcp/playback/playback.sqlite3*' \
-      "${TAR_TARGETS[@]}"
+      "${TAR_TARGETS[@]}"; then
+    :
+  else
+    tar_status=$?
+    [ "$tar_status" -eq 1 ]
+  fi
 ) | zstd -T0 > "$ARCHIVE_FILE"
 if [ ! -s "$DB_DIR/mysql_xiaozhi_users.sql" ] \
   || ! zstd -t "$DB_DIR/mysql_xiaozhi_databases.sql.zst" >/dev/null \
