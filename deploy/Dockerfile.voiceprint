@@ -1,0 +1,3 @@
+FROM ghcr.nju.edu.cn/xinnan-tech/voiceprint-api@sha256:92b0ee9a9cbc125fcae11cc6361ff6fe88cd5985c234b02d5384fdba476fcaff
+WORKDIR /app
+COPY services/server/voiceprint_api_entrypoint.py /app/voiceprint_api_entrypoint.py

@@ -9,6 +9,8 @@ __pycache__/
 
 # Environments
 .env
+.env.*
+!.env.production
 .venv
 env/
 venv/
@@ -24,6 +26,15 @@ data/
 # Models (large model weights)
 *.pt
 *.bin
+
+# Monorepo runtime state and generated build output
+/state/
+**/node_modules/
+**/dist/
+**/target/
+**/.webpack_cache/
+
+deploy/.env
 
 # OS generated
 .DS_Store

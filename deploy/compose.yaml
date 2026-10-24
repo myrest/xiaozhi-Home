@@ -1,0 +1,262 @@
+name: xiaozhi
+
+services:
+  xiaozhi-esp32-server:
+    image: xiaozhi-server:custom-v2
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    container_name: xiaozhi-esp32-server
+    restart: unless-stopped
+    depends_on:
+      xiaozhi-esp32-server-db:
+        condition: service_healthy
+      xiaozhi-esp32-server-redis:
+        condition: service_healthy
+      bedtime-mcp-endpoint:
+        condition: service_healthy
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      TZ: Asia/Shanghai
+      XIAOZHI_MCP_ENDPOINT_FILE: /run/secrets/xiaozhi_endpoint
+    ports:
+      - "16000:8000"
+      - "8003:8003"
+    volumes:
+      - type: bind
+        source: ../state/server/data
+        target: /opt/xiaozhi-esp32-server/data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt
+        target: /mnt
+        read_only: true
+        bind:
+          propagation: rslave
+          create_host_path: false
+      - type: bind
+        source: ../state/mcp/endpoint-urls/xiaozhi_endpoint
+        target: /run/secrets/xiaozhi_endpoint
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../state/models/SenseVoiceSmall/model.pt
+        target: /opt/xiaozhi-esp32-server/models/SenseVoiceSmall/model.pt
+        read_only: true
+        bind:
+          create_host_path: false
+    networks: [app]
+
+  xiaozhi-esp32-server-web:
+    image: xiaozhi-web:custom-v2
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.manager
+    container_name: xiaozhi-esp32-server-web
+    restart: unless-stopped
+    depends_on:
+      xiaozhi-esp32-server-db:
+        condition: service_healthy
+      xiaozhi-esp32-server-redis:
+        condition: service_healthy
+    env_file:
+      - ../state/secrets/manager.env
+    environment:
+      TZ: Asia/Shanghai
+      SPRING_DATASOURCE_DRUID_URL: jdbc:mysql://xiaozhi-esp32-server-db:3306/xiaozhi_esp32_server?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&nullCatalogMeansCurrent=true&connectTimeout=30000&socketTimeout=30000&autoReconnect=true&failOverReadOnly=false&maxReconnects=10
+      SPRING_DATASOURCE_DRUID_USERNAME: root
+      SPRING_DATA_REDIS_HOST: xiaozhi-esp32-server-redis
+      SPRING_DATA_REDIS_PASSWORD: ""
+      SPRING_DATA_REDIS_PORT: "6379"
+    ports:
+      - "16001:8002"
+    volumes:
+      - type: bind
+        source: ../state/server/uploadfile
+        target: /uploadfile
+        bind:
+          create_host_path: false
+    networks: [app]
+
+  xiaozhi-esp32-server-db:
+    image: mysql@sha256:9d48c42f8341068f199116dfccb919b607c99765b5c61e549a548a43033471a4
+    container_name: xiaozhi-esp32-server-db
+    restart: unless-stopped
+    env_file:
+      - ../state/secrets/mysql.env
+    environment:
+      TZ: Asia/Shanghai
+      MYSQL_DATABASE: xiaozhi_esp32_server
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - type: bind
+        source: ../state/mysql/data
+        target: /var/lib/mysql
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_ROOT_PASSWORD}\" mysqladmin ping -h 127.0.0.1 -uroot --silent"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks: [app]
+
+  xiaozhi-esp32-server-redis:
+    image: redis@sha256:ae471bdc20de180beed36e347d170ec0bdf8faa327959ea1f24692f22b05b955
+    container_name: xiaozhi-esp32-server-redis
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: ../state/redis
+        target: /data
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks: [app]
+
+  voiceprint-api:
+    image: xiaozhi-voiceprint:custom-v2
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.voiceprint
+    container_name: voiceprint-api
+    restart: unless-stopped
+    command: ["python", "voiceprint_api_entrypoint.py"]
+    depends_on:
+      xiaozhi-esp32-server-db:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - type: bind
+        source: ../state/server/data
+        target: /app/data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../state/server/data/voiceprint-modelscope-cache
+        target: /root/.cache/modelscope
+        bind:
+          create_host_path: false
+    expose: ["8005"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import yaml,urllib.request; c=yaml.safe_load(open('/app/data/.voiceprint.yaml')); urllib.request.urlopen('http://127.0.0.1:8005/voiceprint/health?key='+c['server']['authorization'], timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+    security_opt:
+      - seccomp:unconfined
+    networks: [app]
+
+  endpoint-init:
+    image: xiaozhi-mcp-endpoint:custom-v2
+    build:
+      context: ..
+      dockerfile: services/mcp/Dockerfile.endpoint
+    user: "1000:1000"
+    command: ["/app/endpoint-bootstrap.py"]
+    environment:
+      XIAOZHI_AGENT_ID: "171abaf0ad664538a51969b7e8f29eba"
+      XIAOZHI_ENDPOINT_HOST: bedtime-mcp-endpoint
+    volumes:
+      - type: bind
+        source: ../state/mcp/endpoint
+        target: /app/upstream/data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../state/mcp/endpoint-urls
+        target: /run/endpoint-urls
+        bind:
+          create_host_path: false
+    networks: [mcp-backend]
+    profiles: [bootstrap]
+
+  bedtime-mcp-endpoint:
+    image: xiaozhi-mcp-endpoint:custom-v2
+    build:
+      context: ..
+      dockerfile: services/mcp/Dockerfile.endpoint
+    container_name: xiaozhi-bedtime-endpoint-1
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 256m
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    volumes:
+      - type: bind
+        source: ../state/mcp/endpoint/.mcp-endpoint-server.cfg
+        target: /app/upstream/data/.mcp-endpoint-server.cfg
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8004/mcp_endpoint/', timeout=2).read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks:
+      app:
+        aliases: [bedtime-mcp-endpoint]
+      mcp-backend:
+        aliases: [endpoint]
+
+  bedtime-mcp-playback:
+    image: xiaozhi-mcp-playback:custom-v2
+    build:
+      context: ..
+      dockerfile: services/mcp/Dockerfile
+    container_name: xiaozhi-bedtime-playback-1
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 256m
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
+    volumes:
+      - type: bind
+        source: /mnt
+        target: /mnt
+        read_only: true
+        bind:
+          propagation: rslave
+          create_host_path: false
+      - type: bind
+        source: ../state/mcp/playback
+        target: /data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../state/mcp/endpoint-urls/tool_endpoint
+        target: /run/secrets/mcp_endpoint
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      bedtime-mcp-endpoint:
+        condition: service_healthy
+    networks: [mcp-backend]
+
+networks:
+  app:
+    name: xiaozhi_default
+  mcp-backend:
+    name: xiaozhi_mcp-backend
+    internal: true

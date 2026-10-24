@@ -1,0 +1,22 @@
+FROM python:3.10-alpine3.22@sha256:c8f94b3bb77e6ea9015ccd091b7f8aec1b1fcbca95159675235d9a93788797cd
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+WORKDIR /app/upstream
+
+COPY services/mcp/endpoint/redact-token.patch /tmp/redact-token.patch
+ADD --checksum=sha256:baed750972a60b8737cedac82bf85c460a737bc1124a62b2bbe88f65136f94ed \
+    https://codeload.github.com/xinnan-tech/mcp-endpoint-server/tar.gz/0f9302f327100fb976c7bdea6e4ebbb8ebdb5787 \
+    /tmp/mcp-endpoint-server.tar.gz
+RUN apk add --no-cache patch \
+    && mkdir -p /app/upstream/data \
+    && tar -xzf /tmp/mcp-endpoint-server.tar.gz --strip-components=1 -C /app/upstream \
+    && patch -d /app/upstream -p1 < /tmp/redact-token.patch \
+    && rm -f /tmp/mcp-endpoint-server.tar.gz /tmp/redact-token.patch \
+    && apk del patch
+COPY services/mcp/requirements-endpoint.lock.txt /app/requirements-endpoint.lock.txt
+RUN pip install --no-cache-dir -r /app/requirements-endpoint.lock.txt
+COPY services/mcp/endpoint/bootstrap.py /app/endpoint-bootstrap.py
+RUN chown -R 1000:1000 /app/upstream/data
+USER 1000:1000
+ENTRYPOINT ["python"]
+CMD ["main.py"]

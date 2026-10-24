@@ -1,0 +1,5 @@
+{
+  "source_root": "/mnt/cfcard",
+  "database": "/data/playback.sqlite3",
+  "endpoint_file": "/run/secrets/mcp_endpoint"
+}

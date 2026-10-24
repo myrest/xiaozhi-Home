@@ -1,87 +1,66 @@
-# xiaozhi-Home
+# XiaoZhi Home
 
-本專案為小智 AI 音箱（xiaozhi-esp32）的客製化語音服務核心代碼，掛載於 Docker 容器 `xiaozhi-esp32-server`。
+此 Git repository 是 XiaoZhi 主機的公開 monorepo；所有程式碼與客製修改都會推送到 `myrest/xiaozhi-Home`。**不可提交 runtime secrets、使用者資料或模型權重。**實際資料放在 Git 忽略的 `state/`；Google Drive 備份依目前選擇不做客戶端加密，必須限制 Drive 帳號存取。
 
-- **上游開源專案**：[`xinnan-tech/xiaozhi-esp32-server`](https://github.com/xinnan-tech/xiaozhi-esp32-server)（對齊子目錄 `main/xiaozhi-server`）
-- **本地自訂遠端倉庫**：[`myrest/xiaozhi-Home`](https://github.com/myrest/xiaozhi-Home)
-- **容器掛載目標**：`~/xiaozhi-Home/core` 與 `~/xiaozhi-Home/plugins_func` 分別熱掛載至容器內 `/opt/xiaozhi-esp32-server/`
-
----
-
-## 本地客製修補與特性 (Custom Patches)
-
-1. **Gemini LLM 相容性修正** (`core/providers/llm/gemini/gemini.py`)：
-   - 解決新版 `google-generativeai` SDK 的 Function Declaration Schema 欄位檢查嚴格限制，自動遞迴清理不支援的 JSON schema 屬性。
-   - 修正超時參數調用為 `request_options={"timeout": ...}`。
-2. **Edge-TTS 2026 舊端點 403 智慧防護** (`core/providers/tts/edge.py`)：
-   - 微軟於 2026-10 棄用舊端點 (`speech.platform.bing.com`)。
-   - 內建**動態版本守衛**：若容器環境內的 `edge-tts < 7.3.0`，自動切換至新端點 `api.msedgeservices.com`；若未來 Docker 映像檔升級至 `edge-tts >= 7.3.1`，則自動讓位使用原生端點，具備向前相容性。
-3. **自訂 Python 工具外掛** (`plugins_func/`)：
-   - 放置自編的工具外掛程式碼，支援熱載入，重啟主服務即可生效。
-
----
-
-## 版本控制架構與工作流程 (Version Control & Workflow)
-
-為避免官方 Monorepo（Java/Vue/文檔）3,000+ 個頻繁 Commit 污染個人倉庫，本專案採用 **Vendor Snapshot（壓平同步）** 模式維護：
+## 目錄
 
 ```text
-[官方 GitHub Monorepo]
-  └─ main/xiaozhi-server/  ──(./sync-upstream.sh 壓平抽取)──>  [~/xiaozhi-Home (本地)]
-                                                                     │
-                                                            (git commit & push)
-                                                                     ▼
-                                                       [myrest/xiaozhi-Home (個人 Remote)]
+services/server/       XiaoZhi Python server、plugins、設定範本與測試
+services/manager/      manager-api / manager-web；上游版本與 SHA 見 UPSTREAM.md
+services/mcp/          bedtime MCP endpoint、playback、鎖定的 Python dependencies
+  ├── endpoint/        upstream patch 與 credential bootstrap
+  └── bedtime_mcp/     MCP tools 與故事播放
+
+deploy/                統一 Docker Compose 與各服務 Dockerfile
+scripts/deploy.sh      建置並啟動整個 XiaoZhi stack
+ops/dockerbackup/      主機 Docker 備份、還原程式與還原說明
+docs/server-operations.md XiaoZhi 端點、裝置設定與日常維護
+state/                 Git 忽略；所有 XiaoZhi runtime state 與 secrets
 ```
 
-### 1. 平常開發自訂外掛 (Daily Development Workflow)
+`state/` 的主要資料：`server/data/`、`server/uploadfile/`、`mysql/data/`、`mcp/{endpoint,endpoint-urls,playback}/`、`redis/`、`models/`、`secrets/`。MySQL 與 manager 的環境檔只放在 `state/secrets/`，權限設為 `0600`；永遠不要把檔案內容貼到公開 issue、commit 或 log。
 
-當在 `plugins_func/functions/` 增加自撰工具或修改代碼時：
+## 建置與操作
 
 ```bash
-cd ~/xiaozhi-Home
+# 驗證 Compose 並重建/啟動全部服務
+./scripts/deploy.sh
 
-# 1. 提交至個人 GitHub
-git add .
-git commit -m "feat: add my custom plugin"
-git push origin main
-
-# 2. 重啟音箱容器即時載入生效
-docker restart xiaozhi-esp32-server
+# 狀態、log、停止
+docker compose -f deploy/compose.yaml ps
+docker compose -f deploy/compose.yaml logs -f xiaozhi-esp32-server
+docker compose -f deploy/compose.yaml down
 ```
 
-### 2. 同步官方上游新版本 (Upstream Sync Workflow)
+MCP 回歸測試以鎖定的 endpoint/playback images 執行：`./services/mcp/scripts/run_tests.sh`。
 
-當官方發布新版本（例如 `v0.9.8`）或新修復時，執行專案根目錄的無污染同步腳本：
+`./scripts/deploy.sh` 會在 MCP endpoint credential 檔案缺少時自動初始化；也可在 endpoint state 尚未初始化時手動執行：
 
 ```bash
-cd ~/xiaozhi-Home
-
-# 步驟 1：一鍵安全抓取官方新版本（自動保護 plugins_func 與自訂檔案）
-./sync-upstream.sh [版本標籤或 main，預設為 main]
-
-# 步驟 2：檢視官方檔案變動
-git diff
-
-# 步驟 3：重啟容器測試音箱對話與各模組運作
-docker restart xiaozhi-esp32-server
-
-# 步驟 4：確認無誤後，以「單一乾淨 Commit」推進個人遠端
-git add .
-git commit -m "chore: sync with upstream <版本號>"
-git push origin main
+docker compose -f deploy/compose.yaml --profile bootstrap run --build --rm --no-deps endpoint-init
 ```
 
----
+單一 Compose project 管理 server、manager、MySQL、Redis、voiceprint 與 bedtime MCP。播放服務只接 `mcp-backend` internal network；endpoint 同時透過 `bedtime-mcp-endpoint` alias 提供給 XiaoZhi server。故事媒體仍由宿主機 `/mnt` read-only、`rslave` 掛載；`/mnt/cfcard` 不搬入 repo，並由獨立備份保護。
 
-## 目錄結構
+主機對外連接埠維持現有裝置與管理端點：語音 WebSocket `16000`、管理台 `16001`、視覺分析 `8003`。MySQL、Redis、聲紋與 MCP 僅在 Docker network 內提供服務。
 
-```text
-xiaozhi-Home/
-├── core/                # 語音核心、ASR/TTS/LLM 通訊邏輯（熱掛載）
-├── plugins_func/        # 自訂 Python 外掛工具庫（熱掛載）
-├── config/              # 配置載入器與音效資源
-├── sync-upstream.sh     # 官方版本無污染同步腳本（可執行）
-├── Dockerfile-server    # 自編映像檔規格
-└── app.py               # 服務主進入點
+設備設定使用 OTA `http://<host>:16001/xiaozhi/ota/`（保留結尾斜線）；直接 WebSocket 為 `ws://<host>:16000/xiaozhi/v1/`。視覺分析路徑是 `/mcp/vision/explain`。
+
+Dockerfile 的 base image 使用 digest；manager 使用 `npm ci` 與 Maven；MCP 使用已鎖定的 pip dependencies。Server Python dependencies 隨鎖定的 upstream server base image 提供。更新上游 server 時，`sync-upstream.sh` 只會改 `services/server/`，不會覆蓋 monorepo 其他模組。執行前先提交 server subtree 變更，再檢查同步差異。
+
+## 備份與還原
+
+```bash
+./ops/dockerbackup/backup-docker.sh
+./ops/dockerbackup/restore-docker.sh latest
 ```
+
+每日 03:00 cron 使用 repo 內的備份腳本。新備份包含 `state/`、MySQL logical dump、SQLite online snapshots 與既有宿主機設定；不包含可由 Git 取得的 XiaoZhi 原始碼、MySQL raw datadir 或 SenseVoiceSmall 權重。Manifest 記錄 monorepo commit；restore 會從公開 remote 取得該版本。
+
+備份包含 credentials 與使用者資料，Google Drive remote 目前不做客戶端加密；Drive 權限即為資料保護邊界。CF 卡媒體由使用者既有的另一套備份保護。SenseVoiceSmall 還原時下載並核對 SHA-256；無網路時 ASR 模型不能還原。
+
+## 客製內容與來源
+
+- Server：Gemini schema/timeout 修正、Edge TTS 修正、自訂 `play_story` MCP plugin，以及本地 MCP endpoint 設定來源。
+- Manager：Agent/Intent 相容性修改與 `llmCapabilities` 前端修改；來源基準為 `services/manager/UPSTREAM.md` 所記錄的官方 commit，不推送到官方 upstream。
+- MCP：Bedtime 故事目錄、播放計畫、播放狀態工具與 token bootstrap。

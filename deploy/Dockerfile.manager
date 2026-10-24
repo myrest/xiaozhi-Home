@@ -1,0 +1,21 @@
+FROM node:18@sha256:c6ae79e38498325db67193d391e6ec1d224d96c693a8a4d943498556716d3783 AS web-builder
+WORKDIR /app
+COPY services/manager/manager-web/package*.json ./
+RUN npm ci
+COPY services/manager/manager-web/ ./
+RUN npm run build
+
+FROM maven:3.9.4-eclipse-temurin-21@sha256:a9b1581fc335b6eb0f56e2c884e870dbfb6519571475a06a941143d407c51bf7 AS api-builder
+WORKDIR /app
+COPY services/manager/manager-api/pom.xml ./
+COPY services/manager/manager-api/src ./src
+RUN mvn --batch-mode --no-transfer-progress clean package -Dmaven.test.skip=true
+
+FROM ghcr.nju.edu.cn/xinnan-tech/xiaozhi-esp32-server:web_latest@sha256:bb3cf48cf7df7e9e9b36c218df1fb15e7f65b5b0a771dac1503cb2400419e96d
+COPY services/manager/docs/docker/nginx.conf /etc/nginx/nginx.conf
+COPY services/manager/docs/docker/start.sh /start.sh
+COPY --from=web-builder /app/dist /usr/share/nginx/html
+COPY --from=api-builder /app/target/xiaozhi-esp32-api.jar /app/xiaozhi-esp32-api.jar
+RUN chmod +x /start.sh
+EXPOSE 8002
+CMD ["/start.sh"]

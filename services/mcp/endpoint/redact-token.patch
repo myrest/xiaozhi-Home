@@ -1,0 +1,5 @@
+--- a/src/server.py
++++ b/src/server.py
+@@ -46 +46 @@
+-        logger.error(f"token解密失败: {token}")
++        logger.error("token解密失败")
