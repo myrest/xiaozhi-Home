@@ -81,3 +81,28 @@ async def test_get_llm_dialogue_separates_temporary_few_shot_from_actual_history
     contents = [m["content"] for m in msgs if m["role"] == "user"]
     assert "real user msg" in contents
     assert "fewshot example" in contents
+
+
+def test_provider_tool_metadata_is_opt_in():
+    signature = b"gemini-tool-signature"
+    dialogue = Dialogue()
+    dialogue.put(
+        Message(
+            role="assistant",
+            tool_calls=[
+                {
+                    "id": "call-1",
+                    "function": {"name": "bedtime_library", "arguments": "{}"},
+                }
+            ],
+            provider_metadata={"thought_signatures": {"call-1": signature}},
+        )
+    )
+
+    default_messages = dialogue.get_llm_dialogue()
+    gemini_messages = dialogue.get_llm_dialogue_with_memory(
+        include_provider_metadata=True
+    )
+
+    assert "provider_metadata" not in default_messages[0]
+    assert gemini_messages[0]["provider_metadata"]["thought_signatures"]["call-1"] == signature

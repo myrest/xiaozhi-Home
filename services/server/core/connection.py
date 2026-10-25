@@ -1139,22 +1139,27 @@ class ConnectionHandler:
                 self.system_introduced_speakers.add(cs)
                 speaker_for_system = cs
 
+            llm_dialogue = self.dialogue.get_llm_dialogue_with_memory(
+                memory_str,
+                self.config.get("voiceprint", {}),
+                speaker_for_system,
+                include_provider_metadata=getattr(
+                    self.llm, "supports_provider_metadata", False
+                ),
+            )
             if self.intent_type == "function_call" and functions is not None:
                 # 使用支持functions的streaming接口
                 llm_responses = self.llm.response_with_functions(
                     self.session_id,
-                    self.dialogue.get_llm_dialogue_with_memory(
-                        memory_str, self.config.get("voiceprint", {}), speaker_for_system
-                    ),
+                    llm_dialogue,
                     functions=functions,
                 )
             else:
                 llm_responses = self.llm.response(
                     self.session_id,
-                    self.dialogue.get_llm_dialogue_with_memory(
-                        memory_str, self.config.get("voiceprint", {}), speaker_for_system
-                    ),
+                    llm_dialogue,
                 )
+
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM 处理出错 {query}: {e}")
             return None
@@ -1420,6 +1425,16 @@ class ConnectionHandler:
 
         return True
 
+    @staticmethod
+    def _tool_call_provider_metadata(tool_results):
+        thought_signatures = {
+            tool_call_data["id"]: tool_call_data["thought_signature"]
+            for _, tool_call_data in tool_results
+            if tool_call_data.get("id") is not None
+            and tool_call_data.get("thought_signature") is not None
+        }
+        return {"thought_signatures": thought_signatures} if thought_signatures else None
+
     def _handle_function_result(self, tool_results, depth, streamed_text=""):
         need_llm_tools = []
         record_tools = []
@@ -1466,7 +1481,13 @@ class ConnectionHandler:
                 }
                 for idx, (_, tool_call_data) in enumerate(record_tools)
             ]
-            self.dialogue.put(Message(role="assistant", tool_calls=all_tool_calls))
+            self.dialogue.put(
+                Message(
+                    role="assistant",
+                    tool_calls=all_tool_calls,
+                    provider_metadata=self._tool_call_provider_metadata(record_tools),
+                )
+            )
 
             # 写入每条工具的执行结果，记录"工具返回了什么"
             for result, tool_call_data in record_tools:
@@ -1509,7 +1530,13 @@ class ConnectionHandler:
                 }
                 for idx, (_, tool_call_data) in enumerate(need_llm_tools)
             ]
-            self.dialogue.put(Message(role="assistant", tool_calls=all_tool_calls))
+            self.dialogue.put(
+                Message(
+                    role="assistant",
+                    tool_calls=all_tool_calls,
+                    provider_metadata=self._tool_call_provider_metadata(need_llm_tools),
+                )
+            )
 
             for result, tool_call_data in need_llm_tools:
                 text = result.result
@@ -1872,7 +1899,9 @@ class ConnectionHandler:
 
             # 确保列表有足够的位置
             if tool_index >= len(tool_calls_list):
-                tool_calls_list.append({"id": "", "name": "", "arguments": ""})
+                tool_calls_list.append(
+                    {"id": "", "name": "", "arguments": "", "thought_signature": None}
+                )
 
             # 更新工具调用信息
             if tool_call.id:
@@ -1881,3 +1910,6 @@ class ConnectionHandler:
                 tool_calls_list[tool_index]["name"] = tool_call.function.name
             if tool_call.function.arguments:
                 tool_calls_list[tool_index]["arguments"] += tool_call.function.arguments
+            thought_signature = getattr(tool_call, "thought_signature", None)
+            if thought_signature is not None:
+                tool_calls_list[tool_index]["thought_signature"] = thought_signature

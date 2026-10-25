@@ -39,3 +39,9 @@ docker exec -it xiaozhi-esp32-server tail -f /opt/xiaozhi-esp32-server/tmp/serve
 ```
 
 Check OTA reachability with `curl -i http://<host>:16001/xiaozhi/ota/`. The browser should use the manager URL; the voice endpoint is WebSocket-only.
+
+## Gemini tool-call failures
+
+The server's Gemini provider uses `google-genai==2.24.0` and preserves each tool call's `thought_signature` when replaying the tool result. Keep the SDK pin in `services/server/requirements.txt` and `deploy/Dockerfile.server` aligned.
+
+If a log shows an MCP tool succeeded immediately before `Function call is missing a thought_signature`, the MCP response already returned; inspect the Gemini provider history/replay and rebuild the server image with `./scripts/deploy.sh`. Rebuilding only the MCP image does not apply this fix. An MCP call that itself exceeds its endpoint timeout is a separate failure mode.

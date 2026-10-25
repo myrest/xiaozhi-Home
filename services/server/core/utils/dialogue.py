@@ -13,6 +13,7 @@ class Message:
             tool_calls=None,
             tool_call_id=None,
             is_temporary=False,
+            provider_metadata=None,
     ):
         self.uniq_id = uniq_id if uniq_id is not None else str(uuid.uuid4())
         self.role = role
@@ -20,6 +21,7 @@ class Message:
         self.tool_calls = tool_calls
         self.tool_call_id = tool_call_id
         self.is_temporary = is_temporary  # 标记临时消息（如工具调用提醒）
+        self.provider_metadata = provider_metadata
 
 
 class Dialogue:
@@ -31,9 +33,12 @@ class Dialogue:
     def put(self, message: Message):
         self.dialogue.append(message)
 
-    def getMessages(self, m, dialogue):
+    def getMessages(self, m, dialogue, include_provider_metadata=False):
         if m.tool_calls is not None:
-            dialogue.append({"role": m.role, "tool_calls": m.tool_calls})
+            message = {"role": m.role, "tool_calls": m.tool_calls}
+            if include_provider_metadata and m.provider_metadata:
+                message["provider_metadata"] = m.provider_metadata
+            dialogue.append(message)
         elif m.role == "tool":
             dialogue.append(
                 {
@@ -93,7 +98,7 @@ class Dialogue:
 
     def get_llm_dialogue_with_memory(
             self, memory_str: str = None, voiceprint_config: dict = None,
-            current_speaker: str = None,
+            current_speaker: str = None, include_provider_metadata: bool = False,
     ) -> List[Dict[str, str]]:
         # 构建对话
         dialogue = []
@@ -152,12 +157,16 @@ class Dialogue:
         fewshot_messages = [m for m in non_system_messages if m.is_temporary]
         complete_fewshot = self._ensure_tool_calls_complete(fewshot_messages)
         for m in complete_fewshot:
-            self.getMessages(m, dialogue)
+            self.getMessages(
+                m, dialogue, include_provider_metadata=include_provider_metadata
+            )
 
         # 第三段：实际对话历史（不含 few-shot）
         actual_messages = [m for m in non_system_messages if not m.is_temporary]
         complete_actual = self._ensure_tool_calls_complete(actual_messages)
         for m in complete_actual:
-            self.getMessages(m, dialogue)
+            self.getMessages(
+                m, dialogue, include_provider_metadata=include_provider_metadata
+            )
 
         return dialogue

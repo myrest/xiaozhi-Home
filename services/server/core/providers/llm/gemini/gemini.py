@@ -1,15 +1,16 @@
-import os, json, uuid
+import json
+import os
+import uuid
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
 import requests
-from google import generativeai as genai
-from google.generativeai import types, GenerationConfig
+from google import genai
+from google.genai import types
 
 from core.providers.llm.base import LLMProviderBase
 from core.utils.util import check_model_key
 from config.logger import setup_logging
-from google.generativeai.types import GenerateContentResponse
 from requests import RequestException
 
 log = setup_logging()
@@ -85,21 +86,19 @@ class LLMProvider(LLMProviderBase):
             log.bind(tag=TAG).info(
                 f"Gemini 代理设置成功 - HTTP: {http_proxy}, HTTPS: {https_proxy}"
             )
-        # 配置API密钥
-        genai.configure(api_key=self.api_key)
-
-        # 设置请求超时（秒）
-        self.timeout = cfg.get("timeout", 120)  # 默认120秒
-
-        # 创建模型实例
-        self.model = genai.GenerativeModel(self.model_name)
-
-        self.gen_cfg = GenerationConfig(
-            temperature=0.7,
-            top_p=0.9,
-            top_k=40,
-            max_output_tokens=2048,
+        # google-genai 的 HTTP timeout 單位是毫秒；設定仍以秒為單位。
+        self.timeout = cfg.get("timeout", 120)
+        self.client = genai.Client(
+            api_key=self.api_key,
+            http_options=types.HttpOptions(timeout=int(self.timeout * 1000)),
         )
+
+        self.gen_cfg = {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40,
+            "max_output_tokens": 2048,
+        }
 
     ALLOWED_SCHEMA_FIELDS = {
         'type', 'format', 'description', 'nullable', 'enum',
@@ -147,96 +146,177 @@ class LLMProvider(LLMProviderBase):
             )
         ]
 
-    # Gemini文档提到，无需维护session-id，直接用dialogue拼接而成
+    # Gemini 3 的工具呼叫需要逐次回送模型產生的 thought signature。
+    supports_provider_metadata = True
+
     def response(self, session_id, dialogue, **kwargs):
         yield from self._generate(dialogue, None)
 
     def response_with_functions(self, session_id, dialogue, functions=None):
         yield from self._generate(dialogue, self._build_tools(functions))
 
-    def _generate(self, dialogue, tools):
-        role_map = {"assistant": "model", "user": "user"}
-        contents: list = []
-        # 拼接对话
-        for m in dialogue:
-            r = m["role"]
+    @staticmethod
+    def _build_contents(dialogue):
+        tool_names = {}
+        for message in dialogue:
+            for tool_call in message.get("tool_calls") or []:
+                function = tool_call.get("function") or {}
+                if tool_call.get("id") and function.get("name"):
+                    tool_names[tool_call["id"]] = function["name"]
 
-            if r == "assistant" and "tool_calls" in m:
-                tc = m["tool_calls"][0]
-                contents.append(
-                    {
-                        "role": "model",
-                        "parts": [
-                            {
-                                "function_call": {
-                                    "name": tc["function"]["name"],
-                                    "args": json.loads(tc["function"]["arguments"]),
-                                }
-                            }
-                        ],
-                    }
-                )
+        contents = []
+        system_instructions = []
+        for message in dialogue:
+            role = message["role"]
+            if role == "system":
+                if message.get("content"):
+                    system_instructions.append(str(message["content"]))
                 continue
 
-            if r == "tool":
+            if role == "assistant" and "tool_calls" in message:
+                provider_metadata = message.get("provider_metadata") or {}
+                signatures = provider_metadata.get("thought_signatures") or {}
+                parts = []
+                for tool_call in message["tool_calls"]:
+                    tool_id = tool_call.get("id")
+                    function = tool_call["function"]
+                    raw_arguments = function.get("arguments") or "{}"
+                    arguments = (
+                        json.loads(raw_arguments)
+                        if isinstance(raw_arguments, str)
+                        else raw_arguments
+                    )
+                    if not isinstance(arguments, dict):
+                        raise ValueError(
+                            "Gemini function-call arguments must be a JSON object"
+                        )
+                    function_call = types.FunctionCall(
+                        name=function["name"],
+                        args=arguments,
+                        id=tool_id,
+                    )
+                    parts.append(
+                        types.Part(
+                            function_call=function_call,
+                            thought_signature=signatures.get(tool_id),
+                        )
+                    )
+                contents.append(types.Content(role="model", parts=parts))
+                continue
+
+            if role == "tool":
+                tool_id = message.get("tool_call_id")
+                tool_name = tool_names.get(tool_id)
+                if not tool_name:
+                    raise ValueError(
+                        f"Gemini tool response has no matching function call: {tool_id}"
+                    )
+                raw_response = message.get("content", "")
+                try:
+                    response = (
+                        json.loads(raw_response)
+                        if isinstance(raw_response, str)
+                        else raw_response
+                    )
+                except json.JSONDecodeError:
+                    response = raw_response
+                if not isinstance(response, dict):
+                    response = {"output": response}
                 contents.append(
-                    {
-                        "role": "model",
-                        "parts": [{"text": str(m.get("content", ""))}],
-                    }
+                    types.Content(
+                        role="user",
+                        parts=[
+                            types.Part.from_function_response(
+                                name=tool_name,
+                                response=response,
+                            )
+                        ],
+                    )
                 )
                 continue
 
             contents.append(
-                {
-                    "role": role_map.get(r, "user"),
-                    "parts": [{"text": str(m.get("content", ""))}],
-                }
+                types.Content(
+                    role="model" if role == "assistant" else "user",
+                    parts=[types.Part.from_text(text=str(message.get("content", "")))],
+                )
             )
 
-        stream: GenerateContentResponse = self.model.generate_content(
-            contents=contents,
-            generation_config=self.gen_cfg,
+        system_instruction = "\n\n".join(system_instructions) or None
+        return contents, system_instruction
+
+    def _generate(self, dialogue, tools):
+        contents, system_instruction = self._build_contents(dialogue)
+        tool_config = (
+            types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(
+                    mode=types.FunctionCallingConfigMode.AUTO,
+                )
+            )
+            if tools is not None
+            else None
+        )
+        generation_config = types.GenerateContentConfig(
+            **self.gen_cfg,
+            system_instruction=system_instruction,
             tools=tools,
-            stream=True,
-            request_options={"timeout": self.timeout},
+            tool_config=tool_config,
+        )
+        stream = self.client.models.generate_content_stream(
+            model=self.model_name,
+            contents=contents,
+            config=generation_config,
         )
 
+        tool_calls_by_id = {}
         try:
             for chunk in stream:
-                cand = chunk.candidates[0]
-                for part in cand.content.parts:
-                    # a) 函数调用-通常是最后一段话才是函数调用
-                    if getattr(part, "function_call", None):
-                        fc = part.function_call
-                        yield None, [
-                            SimpleNamespace(
-                                id=uuid.uuid4().hex,
-                                type="function",
-                                function=SimpleNamespace(
-                                    name=fc.name,
-                                    arguments=json.dumps(
-                                        dict(fc.args), ensure_ascii=False
-                                    ),
+                candidates = getattr(chunk, "candidates", None) or []
+                if not candidates:
+                    continue
+                candidate = candidates[0]
+                candidate_content = getattr(candidate, "content", None)
+                if candidate_content is None:
+                    continue
+
+                for part in candidate_content.parts:
+                    function_call = getattr(part, "function_call", None)
+                    if function_call is not None:
+                        tool_id = getattr(function_call, "id", None)
+                        previous = tool_calls_by_id.get(tool_id) if tool_id else None
+                        tool_id = tool_id or (
+                            previous.id if previous is not None else uuid.uuid4().hex
+                        )
+                        tool_calls_by_id[tool_id] = SimpleNamespace(
+                            id=tool_id,
+                            index=(
+                                previous.index
+                                if previous is not None
+                                else len(tool_calls_by_id)
+                            ),
+                            type="function",
+                            function=SimpleNamespace(
+                                name=function_call.name,
+                                arguments=json.dumps(
+                                    dict(function_call.args or {}),
+                                    ensure_ascii=False,
                                 ),
-                            )
-                        ]
-                        return
-                    # b) 普通文本
-                    if getattr(part, "text", None):
-                        yield part.text if tools is None else (part.text, None)
+                            ),
+                            thought_signature=getattr(part, "thought_signature", None),
+                        )
+                    elif getattr(part, "text", None):
+                        yield (
+                            part.text
+                            if tools is None
+                            else (part.text, None)
+                        )
 
+            if tool_calls_by_id:
+                yield None, sorted(
+                    tool_calls_by_id.values(),
+                    key=lambda tool_call: tool_call.index,
+                )
         finally:
-            if tools is not None:
-                yield None, None  # function‑mode 结束，返回哑包
-
-    # 关闭stream，预留后续打断对话功能的功能方法，官方文档推荐打断对话要关闭上一个流，可以有效减少配额计费和资源占用
-    @staticmethod
-    def _safe_finish_stream(stream: GenerateContentResponse):
-        if hasattr(stream, "resolve"):
-            stream.resolve()  # Gemini SDK version ≥ 0.5.0
-        elif hasattr(stream, "close"):
-            stream.close()  # Gemini SDK version < 0.5.0
-        else:
-            for _ in stream:  # 兜底耗尽
-                pass
+            close_stream = getattr(stream, "close", None)
+            if close_stream is not None:
+                close_stream()
