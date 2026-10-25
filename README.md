@@ -13,7 +13,6 @@ services/mcp/          bedtime MCP endpoint、playback、鎖定的 Python depend
 
 deploy/                統一 Docker Compose 與各服務 Dockerfile
 scripts/deploy.sh      建置並啟動整個 XiaoZhi stack
-ops/dockerbackup/      主機 Docker 備份、還原程式與還原說明
 docs/server-operations.md XiaoZhi 端點、裝置設定與日常維護
 state/                 Git 忽略；所有 XiaoZhi runtime state 與 secrets
 ```
@@ -51,11 +50,11 @@ Dockerfile 的 base image 使用 digest；manager 使用 `npm ci` 與 Maven；MC
 ## 備份與還原
 
 ```bash
-./ops/dockerbackup/backup-docker.sh
-./ops/dockerbackup/restore-docker.sh latest
+~/bin/dockerbackup/backup-docker.sh
+~/bin/dockerbackup/restore-docker.sh latest
 ```
 
-每日 03:00 cron 使用 repo 內的備份腳本。新備份包含 `state/`、MySQL logical dump、SQLite online snapshots 與既有宿主機設定；不包含可由 Git 取得的 XiaoZhi 原始碼、MySQL raw datadir 或 SenseVoiceSmall 權重。Manifest 記錄 monorepo commit；restore 會從公開 remote 取得該版本。
+備份／還原工具與說明只放在主機本地 `~/bin/dockerbackup/`，不納入此 repo；備份輸出位於 `/home/roytai/backups/`，每日 03:00 cron 呼叫主機本地備份程式。備份會將 `~/bin/` 納入 archive，讓工具隨主機資料復原；Manifest 記錄 monorepo commit，XiaoZhi 原始碼仍由公開 Git remote 還原。Archive 包含 `state/`、MySQL logical dump、SQLite online snapshots 與宿主機設定；不包含 Git 可取得的 XiaoZhi 原始碼、MySQL raw datadir 或 SenseVoiceSmall 權重。
 
 備份包含 credentials 與使用者資料，Google Drive remote 目前不做客戶端加密；Drive 權限即為資料保護邊界。CF 卡媒體由使用者既有的另一套備份保護。SenseVoiceSmall 還原時下載並核對 SHA-256；無網路時 ASR 模型不能還原。
 
