@@ -7,6 +7,10 @@ from .mcp_endpoint_handler import call_mcp_endpoint_tool
 
 
 _INTERNAL_MCP_TOOLS = frozenset({"bedtime_complete"})
+_REMINDER_MCP_TOOLS = frozenset(
+    {"reminder_create", "reminder_list", "reminder_cancel"}
+)
+_REMINDER_CONTEXT_ARGUMENTS = frozenset({"_device_id", "_token"})
 
 class MCPEndpointExecutor(ToolExecutor):
     """MCP接入点工具执行器"""
@@ -23,6 +27,20 @@ class MCPEndpointExecutor(ToolExecutor):
                 action=Action.NOTFOUND,
                 response="该工具仅供故事播放服务内部记录",
             )
+        if tool_name in _REMINDER_MCP_TOOLS:
+            notification_service = getattr(
+                getattr(conn, "server", None), "notification_service", None
+            )
+            token = getattr(notification_service, "token", None)
+            device_id = getattr(conn, "device_id", None)
+            if not isinstance(token, str) or not token or not device_id:
+                return ActionResponse(
+                    action=Action.ERROR,
+                    response="提醒服務或裝置身分尚未就緒",
+                )
+            arguments = dict(arguments or {})
+            arguments["_device_id"] = device_id
+            arguments["_token"] = token
 
         if not hasattr(conn, "mcp_endpoint_client") or not conn.mcp_endpoint_client:
             return ActionResponse(
@@ -89,10 +107,35 @@ class MCPEndpointExecutor(ToolExecutor):
             if tool_name in _INTERNAL_MCP_TOOLS:
                 continue
 
-            if tool_name:
-                tools[tool_name] = ToolDefinition(
-                    name=tool_name, description=tool, tool_type=ToolType.MCP_ENDPOINT
-                )
+            description = tool
+            if tool_name in _REMINDER_MCP_TOOLS:
+                description = dict(tool)
+                function_description = dict(func_def)
+                parameters = function_description.get("parameters")
+                if isinstance(parameters, dict):
+                    parameters = dict(parameters)
+                    properties = parameters.get("properties")
+                    if isinstance(properties, dict):
+                        parameters["properties"] = {
+                            key: value
+                            for key, value in properties.items()
+                            if key not in _REMINDER_CONTEXT_ARGUMENTS
+                        }
+                    required = parameters.get("required")
+                    if isinstance(required, list):
+                        parameters["required"] = [
+                            key
+                            for key in required
+                            if key not in _REMINDER_CONTEXT_ARGUMENTS
+                        ]
+                    function_description["parameters"] = parameters
+                description["function"] = function_description
+
+            tools[tool_name] = ToolDefinition(
+                name=tool_name,
+                description=description,
+                tool_type=ToolType.MCP_ENDPOINT,
+            )
 
         return tools
 

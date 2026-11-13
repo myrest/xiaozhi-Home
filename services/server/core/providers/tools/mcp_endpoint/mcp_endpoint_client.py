@@ -34,14 +34,23 @@ class MCPEndpointClient:
         # If cache is not valid, regenerate the list
         result = []
         for tool_name, tool_data in self.tools.items():
+            input_schema = tool_data["inputSchema"]
+            parameters = {
+                "type": input_schema.get("type", "object"),
+                "properties": input_schema.get("properties", {}),
+                "required": input_schema.get("required", []),
+            }
+            parameters.update(
+                {
+                    key: value
+                    for key, value in input_schema.items()
+                    if key not in {"type", "properties", "required"}
+                }
+            )
             function_def = {
                 "name": tool_name,
                 "description": tool_data["description"],
-                "parameters": {
-                    "type": tool_data["inputSchema"].get("type", "object"),
-                    "properties": tool_data["inputSchema"].get("properties", {}),
-                    "required": tool_data["inputSchema"].get("required", []),
-                },
+                "parameters": parameters,
             }
             result.append({"type": "function", "function": function_def})
 

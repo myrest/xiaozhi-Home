@@ -519,7 +519,14 @@ class TTSProvider(TTSProviderBase):
                         logger.bind(tag=TAG).debug(f"句子语音生成开始: {self.tts_text}")
                         # 将TTS服务返回的替换后文本还原为原始文本，用于字幕显示
                         display_text = self._restore_original_text(self.tts_text)
-                        self.tts_audio_queue.put((SentenceType.FIRST, [], display_text))
+                        self.tts_audio_queue.put(
+                            (
+                                SentenceType.FIRST,
+                                [],
+                                display_text,
+                                getattr(self, "current_sentence_id", None),
+                            )
+                        )
                     elif (
                         res.optional.event == EVENT_TTSResponse
                         and res.header.message_type == AUDIO_ONLY_RESPONSE
@@ -532,7 +539,12 @@ class TTSProvider(TTSProviderBase):
                                     f"句子语音生成成功： {tts_text}"
                                 )
                                 self.tts_audio_queue.put(
-                                    (SentenceType.FIRST, [], tts_text)
+                                    (
+                                        SentenceType.FIRST,
+                                        [],
+                                        tts_text,
+                                        getattr(self, "current_sentence_id", None),
+                                    )
                                 )
                                 self.clear_tts_text(self.conn.sentence_id)
                         self.wav_to_opus_data_audio_raw_stream(res.payload, callback=self.handle_opus)

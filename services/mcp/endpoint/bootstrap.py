@@ -78,6 +78,20 @@ def _existing_key() -> str | None:
     return key
 
 
+def _ensure_reminder_token() -> None:
+    configured_path = os.environ.get("XIAOZHI_REMINDER_TOKEN_FILE", "").strip()
+    if not configured_path:
+        return
+    path = Path(configured_path)
+    if path.exists():
+        token = path.read_text(encoding="utf-8").strip()
+        if len(token) < 32 or any(character.isspace() for character in token):
+            raise RuntimeError("Existing reminder token is invalid; refusing to replace it")
+        os.chmod(path, 0o600)
+        return
+    _atomic_private_write(path, secrets.token_urlsafe(32) + "\n")
+
+
 def bootstrap() -> None:
     from src.utils.aes_utils import encrypt
 
@@ -109,6 +123,7 @@ def bootstrap() -> None:
         URL_DIR / "health_url",
         f"http://{external_base}/mcp_endpoint/health?key={key}\n",
     )
+    _ensure_reminder_token()
     print("Endpoint credentials initialized; URLs are stored in the private state directory.")
 
 

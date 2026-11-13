@@ -98,15 +98,26 @@ async def get_config_from_api_async(config):
         "secret": config["manager-api"].get("secret", ""),
     }
     auth_enabled = config_data.get("server", {}).get("auth", {}).get("enabled", False)
-    # server的配置以本地为准
+    # Local network bindings remain local; MQTT credentials and Gateway endpoints
+    # originate in Manager system parameters unless explicitly overridden locally.
     if config.get("server"):
-        config_data["server"] = {
-            "ip": config["server"].get("ip", ""),
-            "port": config["server"].get("port", ""),
-            "http_port": config["server"].get("http_port", ""),
-            "vision_explain": config["server"].get("vision_explain", ""),
-            "auth_key": config["server"].get("auth_key", ""),
+        api_server = config_data.get("server", {})
+        local_server = config["server"]
+        server_config = {
+            "ip": local_server.get("ip", ""),
+            "port": local_server.get("port", ""),
+            "http_port": local_server.get("http_port", ""),
+            "vision_explain": local_server.get("vision_explain", ""),
+            "auth_key": local_server.get("auth_key", ""),
         }
+        for key in ("mqtt_gateway", "mqtt_manager_api", "mqtt_signature_key"):
+            local_value = local_server.get(key)
+            server_config[key] = (
+                local_value
+                if local_value not in (None, "", "null")
+                else api_server.get(key)
+            )
+        config_data["server"] = server_config
     config_data["server"]["auth"] = {"enabled": auth_enabled}
     # 如果服务器没有prompt_template，则从本地配置读取
     if not config_data.get("prompt_template"):

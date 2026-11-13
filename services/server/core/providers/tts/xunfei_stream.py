@@ -370,7 +370,12 @@ class TTSProvider(TTSProviderBase):
                                 if status == 0:
                                     logger.bind(tag=TAG).debug("TTS合成已启动")
                                     self.tts_audio_queue.put(
-                                        (SentenceType.FIRST, [], None)
+                                        (
+                                            SentenceType.FIRST,
+                                            [],
+                                            None,
+                                            getattr(self, "current_sentence_id", None),
+                                        )
                                     )
                                 elif status == 2:
                                     logger.bind(tag=TAG).debug("收到结束状态的音频数据，TTS合成完成")
@@ -384,7 +389,12 @@ class TTSProvider(TTSProviderBase):
                                             f"句子语音生成成功： {tts_text}"
                                         )
                                         self.tts_audio_queue.put(
-                                            (SentenceType.FIRST, [], tts_text)
+                                            (
+                                                SentenceType.FIRST,
+                                                [],
+                                                tts_text,
+                                                getattr(self, "current_sentence_id", None),
+                                            )
                                         )
                                         self.clear_tts_text(self.conn.sentence_id)
                                     try:

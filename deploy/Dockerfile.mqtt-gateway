@@ -1,0 +1,21 @@
+# Upstream: https://github.com/xinnan-tech/xiaozhi-mqtt-gateway @ 93f026ad3a9a5572c9cf6ce651dd8fcf46fd2419.
+# Patch provenance: local patches/notify-ws.patch adds MQTT-over-WebSocket and scoped notification APIs/ACK receipts; package-lock.json was generated from this pinned source's package.json.
+FROM node:20.19.0-bookworm-slim AS build
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git patch \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /opt/xiaozhi-mqtt-gateway
+RUN git clone https://github.com/xinnan-tech/xiaozhi-mqtt-gateway.git . \
+    && git checkout --detach 93f026ad3a9a5572c9cf6ce651dd8fcf46fd2419
+COPY services/mqtt_gateway/patches/notify-ws.patch /tmp/notify-ws.patch
+COPY services/mqtt_gateway/package-lock.json ./package-lock.json
+RUN patch --batch --forward -p1 < /tmp/notify-ws.patch \
+    && npm ci --omit=dev
+
+FROM node:20.19.0-bookworm-slim
+ENV NODE_ENV=production
+WORKDIR /opt/xiaozhi-mqtt-gateway
+COPY --from=build /opt/xiaozhi-mqtt-gateway/ ./
+EXPOSE 1883/tcp 1883/udp 8007/tcp
+CMD ["npm", "start"]

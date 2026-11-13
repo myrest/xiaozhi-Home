@@ -140,11 +140,25 @@ class TTSProvider(TTSProviderBase):
                         logger.bind(tag=TAG).error(
                             f"TTS请求失败: {resp.status}, {await resp.text()}"
                         )
-                        self.tts_audio_queue.put((SentenceType.LAST, [], None))
+                        self.tts_audio_queue.put(
+                            (
+                                SentenceType.LAST,
+                                [],
+                                None,
+                                getattr(self, "current_sentence_id", None),
+                            )
+                        )
                         return
 
                     self.pcm_buffer.clear()
-                    self.tts_audio_queue.put((SentenceType.FIRST, [], text))
+                    self.tts_audio_queue.put(
+                        (
+                            SentenceType.FIRST,
+                            [],
+                            text,
+                            getattr(self, "current_sentence_id", None),
+                        )
+                    )
 
                     # 处理音频流数据
                     async for chunk in resp.content.iter_any():
@@ -179,7 +193,14 @@ class TTSProvider(TTSProviderBase):
 
         except Exception as e:
             logger.bind(tag=TAG).error(f"TTS请求异常: {e}")
-            self.tts_audio_queue.put((SentenceType.LAST, [], None))
+            self.tts_audio_queue.put(
+                (
+                    SentenceType.LAST,
+                    [],
+                    None,
+                    getattr(self, "current_sentence_id", None),
+                )
+            )
 
     def audio_to_pcm_data_stream(
         self, audio_file_path, callback=None

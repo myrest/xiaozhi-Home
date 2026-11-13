@@ -161,6 +161,9 @@ async def handle_mcp_endpoint_message(mcp_client: MCPEndpointClient, message: st
                                 for s in schema.get("required", [])
                                 if isinstance(s, str)
                             ]
+                            for key, value in schema.items():
+                                if key not in {"type", "properties", "required"}:
+                                    input_schema[key] = value
 
                         new_tool = {
                             "name": name,

@@ -18,8 +18,10 @@ services:
     security_opt:
       - seccomp:unconfined
     environment:
-      TZ: Asia/Shanghai
+      TZ: Asia/Taipei
+      REMINDER_AUDIO_PUBLIC_URL: ${REMINDER_AUDIO_PUBLIC_URL:-}
       XIAOZHI_MCP_ENDPOINT_FILE: /run/secrets/xiaozhi_endpoint
+      XIAOZHI_REMINDER_TOKEN_FILE: /run/secrets/reminder_token
     ports:
       - "16000:8000"
       - "8003:8003"
@@ -43,12 +45,18 @@ services:
         bind:
           create_host_path: false
       - type: bind
+        source: ../state/mcp/reminder_token
+        target: /run/secrets/reminder_token
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
         source: ../state/models/SenseVoiceSmall/model.pt
         target: /opt/xiaozhi-esp32-server/models/SenseVoiceSmall/model.pt
         read_only: true
         bind:
           create_host_path: false
-    networks: [app]
+    networks: [app, reminder-notifications]
 
   xiaozhi-esp32-server-web:
     image: xiaozhi-web:custom-v2
@@ -169,6 +177,7 @@ services:
     environment:
       XIAOZHI_AGENT_ID: "171abaf0ad664538a51969b7e8f29eba"
       XIAOZHI_ENDPOINT_HOST: bedtime-mcp-endpoint
+      XIAOZHI_REMINDER_TOKEN_FILE: /run/reminder-state/reminder_token
     volumes:
       - type: bind
         source: ../state/mcp/endpoint
@@ -178,6 +187,11 @@ services:
       - type: bind
         source: ../state/mcp/endpoint-urls
         target: /run/endpoint-urls
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../state/mcp
+        target: /run/reminder-state
         bind:
           create_host_path: false
     networks: [mcp-backend]
@@ -254,9 +268,87 @@ services:
         condition: service_healthy
     networks: [mcp-backend]
 
+  reminder-mcp:
+    image: xiaozhi-reminder-mcp:custom-v2
+    build:
+      context: ..
+      dockerfile: services/mcp/Dockerfile.reminder
+    container_name: xiaozhi-reminder-mcp-1
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 256m
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    environment:
+      TZ: Asia/Taipei
+      REMINDER_DATABASE: /data/reminders.sqlite3
+      REMINDER_ENDPOINT_FILE: /run/secrets/mcp_endpoint
+      REMINDER_NOTIFICATION_URL: http://xiaozhi-esp32-server:8006/internal/reminders/sync
+      REMINDER_TOKEN_FILE: /run/secrets/reminder_token
+    volumes:
+      - type: bind
+        source: ../state/mcp/reminders
+        target: /data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../state/mcp/endpoint-urls/tool_endpoint
+        target: /run/secrets/mcp_endpoint
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../state/mcp/reminder_token
+        target: /run/secrets/reminder_token
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      bedtime-mcp-endpoint:
+        condition: service_healthy
+      xiaozhi-esp32-server:
+        condition: service_started
+    networks: [mcp-backend, reminder-notifications]
+
+  mqtt-gateway:
+    image: xiaozhi-mqtt-gateway:custom-v1
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.mqtt-gateway
+    container_name: xiaozhi-mqtt-gateway
+    restart: unless-stopped
+    profiles: [reminder-mqtt]
+    environment:
+      TZ: Asia/Taipei
+      API_PORT: "8007"
+      MQTT_PORT: "1883"
+      UDP_PORT: "8884"
+      PUBLIC_IP: ${MQTT_PUBLIC_IP:-127.0.0.1}
+      MQTT_SIGNATURE_KEY: ${MQTT_SIGNATURE_KEY:-}
+      SERVER_SECRET: ${MQTT_SERVER_SECRET:-}
+    ports:
+      - "127.0.0.1:8007:8007"
+    volumes:
+      - type: bind
+        source: ../services/mqtt_gateway/mqtt.json
+        target: /opt/xiaozhi-mqtt-gateway/config/mqtt.json
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      xiaozhi-esp32-server:
+        condition: service_started
+    networks: [app, reminder-notifications]
+
 networks:
   app:
     name: xiaozhi_default
   mcp-backend:
     name: xiaozhi_mcp-backend
+    internal: true
+  reminder-notifications:
+    name: xiaozhi_reminder-notifications
     internal: true

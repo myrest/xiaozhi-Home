@@ -1,0 +1,17 @@
+{
+  "production": {
+    "chat_servers": [
+      "ws://xiaozhi-esp32-server:8000/xiaozhi/v1/?from=mqtt_gateway"
+    ]
+  },
+  "debug": false,
+  "max_mqtt_payload_size": 8192,
+  "mcp_client": {
+    "capabilities": {},
+    "client_info": {
+      "name": "xiaozhi-mqtt-client",
+      "version": "1.0.0"
+    },
+    "max_tools_count": 128
+  }
+}

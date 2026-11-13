@@ -1,0 +1,323 @@
+diff --git a/app.js b/app.js
+index 2db412a..91dfefc 100644
+--- a/app.js
++++ b/app.js
+@@ -208,6 +208,8 @@ class WebSocketBridge extends Emitter {
+ }
+ 
+ const MacAddressRegex = /^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/;
++const NotificationUuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
++const NotificationAckStatuses = new Set(['received', 'playing', 'completed', 'stopped', 'expired', 'failed']);
+ 
+ /**
+  * MQTT连接类
+@@ -230,8 +232,8 @@ class MQTTConnection {
+         this.headerBuffer = Buffer.alloc(16);
+         this.mcpPendingRequests = {};
+ 
+-        // 提取真实的客户端IP
+-        this.realClientIp = socket.remoteAddress;
++        // TCP sockets and WebSocket duplex streams share this MQTT transport.
++        this.realClientIp = socket.remoteAddress || null;
+ 
+         // 创建协议处理器，并传入socket
+         this.protocol = new MQTTProtocol(socket, configManager);
+@@ -281,7 +283,6 @@ class MQTTConnection {
+         debug('客户端连接:', {
+             clientId: this.clientId,
+             username: this.username,
+-            password: this.password,
+             protocol: connectData.protocol,
+             protocolLevel: connectData.protocolLevel,
+             keepAlive: connectData.keepAlive
+@@ -294,6 +295,7 @@ class MQTTConnection {
+             this.macAddress = validated.macAddress;
+             this.uuid = validated.uuid;
+             this.userData = validated.userData;
++            this.notificationAuthenticated = true;
+         } else if (parts.length === 2) { // GID_test@@@mac_address
+             this.groupId = parts[0];
+             this.macAddress = parts[1].replace(/_/g, ':');
+@@ -388,7 +390,13 @@ class MQTTConnection {
+             return;
+         }
+ 
+-        const json = JSON.parse(publishData.payload);
++        let json;
++        try {
++            json = JSON.parse(publishData.payload);
++        } catch {
++            debug('忽略格式错误的 MQTT JSON 消息');
++            return;
++        }
+         if (json.type === 'hello') {
+             if (json.version !== 3) {
+                 debug('不支持的协议版本:', json.version, '关闭连接');
+@@ -400,7 +408,7 @@ class MQTTConnection {
+                 this.close();
+             });
+         } else {
+-            this.parseOtherMessage(json).catch(error => {
++            this.parseOtherMessage(json, publishData.topic).catch(error => {
+                 debug('处理其他消息失败:', error);
+                 this.close();
+             });
+@@ -502,7 +510,11 @@ class MQTTConnection {
+         }
+     }
+ 
+-    async parseOtherMessage(json) {
++    async parseOtherMessage(json, topic) {
++        if (json.type === 'notify_ack') {
++            this.server.recordNotificationAck(this, json, topic);
++            return;
++        }
+         if (json.type === 'mcp') {
+             const { id, error, result } = json.payload;
+             const request = this.mcpPendingRequests[id];
+@@ -715,6 +727,7 @@ class MQTTServer {
+         this.publicIp = process.env.PUBLIC_IP || 'mqtt.xiaozhi.me';
+         this.connections = new Map(); // connectionId -> MQTTConnection
+         this.clientIdMap = new Map(); // clientId -> MQTTConnection
++        this.notificationRecords = new Map();
+         this.keepAliveTimer = null;
+         this.keepAliveCheckInterval = 1000; // 默认每1秒检查一次
+ 
+@@ -916,6 +929,86 @@ class MQTTServer {
+     }
+ 
+     // 通过clientId查找连接
++    notificationKey(mac, clientId, reminderId, revision) {
++        return `${mac.toLowerCase()}|${clientId}|${reminderId}|${revision}`;
++    }
++
++    pruneNotificationRecords(nowSeconds = Math.floor(Date.now() / 1000)) {
++        for (const [key, record] of this.notificationRecords) {
++            if (record.expiresAt + 300 < nowSeconds) this.notificationRecords.delete(key);
++        }
++        while (this.notificationRecords.size > 10000) {
++            this.notificationRecords.delete(this.notificationRecords.keys().next().value);
++        }
++    }
++
++    registerNotification(connection, payload) {
++        this.pruneNotificationRecords();
++        const key = this.notificationKey(connection.macAddress, connection.clientId, payload.reminder_id, payload.revision);
++        const payloadHash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
++        const existing = this.notificationRecords.get(key);
++        if (existing) {
++            if (existing.payloadHash !== payloadHash) throw new Error('Conflicting notification revision');
++            return;
++        }
++        this.notificationRecords.set(key, {
++            mac: connection.macAddress.toLowerCase(),
++            clientId: connection.clientId,
++            reminderId: payload.reminder_id,
++            revision: payload.revision,
++            expiresAt: payload.expires_at,
++            payloadHash,
++            type: payload.type,
++            receipt: null
++        });
++    }
++
++    recordNotificationAck(connection, ack, topic) {
++        if (!connection.notificationAuthenticated || topic !== 'device-server' ||
++            !ack || typeof ack !== 'object' || Array.isArray(ack)) return;
++        const keys = Object.keys(ack).sort();
++        if (keys.length !== 4 || keys.join(',') !== 'reminder_id,revision,status,type' ||
++            ack.type !== 'notify_ack' || !NotificationUuidRegex.test(ack.reminder_id) ||
++            !Number.isSafeInteger(ack.revision) || ack.revision < 0 ||
++            !NotificationAckStatuses.has(ack.status)) return;
++
++        const now = Math.floor(Date.now() / 1000);
++        this.pruneNotificationRecords(now);
++        const key = this.notificationKey(connection.macAddress, connection.clientId, ack.reminder_id, ack.revision);
++        const record = this.notificationRecords.get(key);
++        if (!record || record.mac !== connection.macAddress.toLowerCase() ||
++            record.clientId !== connection.clientId || now > record.expiresAt + 300) return;
++        if (record.type === 'notify_cancel' && !['received', 'stopped'].includes(ack.status)) return;
++
++        const rank = status => ({ failed: 0, received: 1, playing: 2, completed: 3, stopped: 3, expired: 3 }[status] ?? -1);
++        if (record.receipt && rank(record.receipt.status) >= rank(ack.status)) return;
++        record.receipt = { status: ack.status, revision: ack.revision, received_at: now };
++    }
++
++    formatNotificationReceipt(record) {
++        if (!record?.receipt) return null;
++        if (record.type === 'notify_cancel' && record.receipt.status === 'stopped') {
++            return { ...record.receipt, status: 'cancelled' };
++        }
++        return record.receipt;
++    }
++
++    getNotificationReceipt(mac, reminderId, revision) {
++        this.pruneNotificationRecords();
++        const connection = this.getConnectionByMac(mac);
++        if (connection) {
++            const key = this.notificationKey(mac, connection.clientId, reminderId, revision);
++            const record = this.notificationRecords.get(key);
++            if (record?.receipt) return this.formatNotificationReceipt(record);
++        }
++        // Receipts remain queryable after disconnect or client credential rotation.
++        for (const record of this.notificationRecords.values()) {
++            if (record.mac === mac.toLowerCase() && record.reminderId === reminderId &&
++                record.revision === revision) return this.formatNotificationReceipt(record);
++        }
++        return null;
++    }
++
+     getConnectionById(clientId) {
+         if (this.clientIdMap.has(clientId)) {
+             return this.clientIdMap.get(clientId);
+@@ -965,7 +1058,27 @@ process.on('SIGINT', () => {
+ const express = require('express');
+ const app = express();
+ const adminPort = process.env.API_PORT || 8007;
++const apiServer = require('http').createServer(app);
++const mqttWebSocketServer = new WebSocket.Server({ noServer: true, maxPayload: 65536 });
++apiServer.on('upgrade', (request, socket, head) => {
++    let pathname;
++    try {
++        pathname = new URL(request.url, 'http://localhost').pathname;
++    } catch {
++        socket.destroy();
++        return;
++    }
++    if (pathname !== '/mqtt') {
++        socket.destroy();
++        return;
++    }
++    mqttWebSocketServer.handleUpgrade(request, socket, head, websocket => {
++        const stream = WebSocket.createWebSocketStream(websocket);
++        new MQTTConnection(stream, server.generateNewConnectionId(), server);
++    });
++});
+ 
++app.use('/api/notifications', express.json({ limit: '8kb' }));
+ app.use(express.json());
+ 
+ // 计算当天的令牌的辅助函数
+@@ -1018,6 +1131,89 @@ function authenticateRequest(req, res, next) {
+     }
+ }
+ 
++function isExactObject(value, expectedKeys) {
++    return value && typeof value === 'object' && !Array.isArray(value) &&
++        Object.keys(value).sort().join(',') === [...expectedKeys].sort().join(',');
++}
++
++app.post('/api/notifications/:mac', authenticateRequest, (req, res) => {
++    const mac = String(req.params.mac).replace(/_/g, ':').toLowerCase();
++    const body = req.body;
++    if (!MacAddressRegex.test(mac) || !body || typeof body !== 'object' ||
++        Buffer.byteLength(JSON.stringify(body), 'utf8') > 8192) {
++        return res.status(400).json({ error: 'Invalid notification request' });
++    }
++
++    const now = Math.floor(Date.now() / 1000);
++    const baseValid = Number.isSafeInteger(body.expires_at) && body.expires_at > now &&
++        typeof body.reminder_id === 'string' && NotificationUuidRegex.test(body.reminder_id);
++    let valid = false;
++    if (body.type === 'notify') {
++        valid = isExactObject(body, ['type', 'reminder_id', 'revision', 'audio_url', 'subtitle', 'expires_at']) &&
++            baseValid && Number.isSafeInteger(body.revision) && body.revision >= 0 &&
++            typeof body.subtitle === 'string' && Buffer.byteLength(body.subtitle, 'utf8') <= 2048 &&
++            typeof body.audio_url === 'string' && body.audio_url.length <= 4096;
++        if (valid) {
++            try {
++                const audioUrl = new URL(body.audio_url);
++                const audioPath = audioUrl.pathname.split('/').filter(Boolean);
++                const signedExpiry = Number(audioUrl.searchParams.get('expires'));
++                const signedDevice = (audioUrl.searchParams.get('device') || '').replace(/_/g, ':').toLowerCase();
++                valid = audioUrl.protocol === 'https:' && !!audioUrl.hostname &&
++                    !audioUrl.username && !audioUrl.password && !audioUrl.hash &&
++                    audioPath.length >= 4 && audioPath.slice(-4).join('/') ===
++                        `reminders/audio/${body.reminder_id}/${body.revision}.ogg` &&
++                    signedDevice === mac && Number.isSafeInteger(signedExpiry) &&
++                    signedExpiry > now && signedExpiry <= body.expires_at &&
++                    /^[a-f0-9]{64}$/i.test(audioUrl.searchParams.get('signature') || '');
++            } catch {
++                valid = false;
++            }
++        }
++    } else if (body.type === 'notify_cancel') {
++        valid = isExactObject(body, ['type', 'reminder_id', 'revision', 'expires_at']) &&
++            baseValid && Number.isSafeInteger(body.revision) && body.revision >= 0;
++    }
++    if (!valid) return res.status(400).json({ error: 'Invalid notification payload' });
++
++    const connection = server.getConnectionByMac(mac);
++    if (!connection || !connection.notificationAuthenticated ||
++        !connection.protocol.isConnected || !connection.protocol.socket.writable) {
++        return res.status(409).json({ error: 'Device MQTT connection is offline' });
++    }
++    try {
++        server.registerNotification(connection, body);
++        connection.protocol.sendPublish(connection.replyTo, JSON.stringify(body), 0, false, false);
++        return res.json({ accepted: true });
++    } catch (error) {
++        if (error.message === 'Conflicting notification revision') {
++            return res.status(409).json({ error: 'Conflicting notification revision' });
++        }
++        console.warn(`Notification publish failed for device ${mac}`);
++        return res.status(503).json({ error: 'Notification publish failed' });
++    }
++});
++
++app.get('/api/notifications/:mac/:reminder_id/receipt', authenticateRequest, (req, res) => {
++    const mac = String(req.params.mac).replace(/_/g, ':').toLowerCase();
++    const revisionText = req.query.revision;
++    const revision = typeof revisionText === 'string' && /^(0|[1-9]\d*)$/.test(revisionText)
++        ? Number(revisionText) : NaN;
++    if (!MacAddressRegex.test(mac) || !NotificationUuidRegex.test(req.params.reminder_id) ||
++        !Number.isSafeInteger(revision)) {
++        return res.status(400).json({ error: 'Invalid receipt query' });
++    }
++    return res.json({ receipt: server.getNotificationReceipt(mac, req.params.reminder_id, revision) });
++});
++app.use('/api/notifications', (error, req, res, next) => {
++    if (error.type === 'entity.too.large') return res.status(413).json({ error: 'Request body too large' });
++    if (error instanceof SyntaxError && Object.prototype.hasOwnProperty.call(error, 'body')) {
++        return res.status(400).json({ error: 'Malformed JSON' });
++    }
++    return next(error);
++});
++
++
+ // 设备指令下发API - 支持MCP指令并返回设备响应
+ app.post('/api/commands/:clientId', authenticateRequest, async (req, res) => {
+     try {
+@@ -1203,18 +1399,8 @@ app.post('/api/call/accept', authenticateRequest, (req, res) => {
+     }
+ });
+ 
+-// 计算并打印当天的临时密钥
+-function calculateAndPrintDailyToken() {
+-    try {
+-        // 调用共享的辅助函数计算令牌
+-        const dailyToken = calculateDailyToken();
+-
+-        // 打印令牌信息
+-        console.log('API今日临时密钥: Authorization: Bearer ' + dailyToken);
+-        return dailyToken;
+-    } catch (error) {
+-        console.error('计算临时密钥失败:', error);
+-    }
++function logDailyTokenAuthReady() {
++    console.log('Daily-token API authentication enabled');
+ }
+ 
+ // 验证MQTT_SIGNATURE_KEY的密码复杂度
+@@ -1258,9 +1444,8 @@ function validateSignatureKeyComplexity() {
+ 
+ // 启动管理API服务
+ if (validateSignatureKeyComplexity()) {
+-    app.listen(adminPort, () => {
++    apiServer.listen(adminPort, () => {
+         console.log(`管理API服务启动在端口 ${adminPort}`);
+-        // 计算并打印当天的临时密钥
+-        calculateAndPrintDailyToken();
++        logDailyTokenAuthReady();
+     });
+ }

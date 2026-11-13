@@ -78,6 +78,64 @@ def test_private_config_uses_call_route_after_local_secret_override(tmp_path, mo
         "ws://bedtime-mcp-endpoint:8004/mcp_endpoint/call/"
         "?token=abc%2Fdef%2Bghi"
     )
+def test_manager_mqtt_settings_survive_local_server_overrides(monkeypatch):
+    async def get_server_config():
+        return {
+            "server": {
+                "mqtt_gateway": "mqtt.example:1883",
+                "mqtt_manager_api": "gateway:8007",
+                "mqtt_signature_key": "manager-secret",
+                "auth": {"enabled": False},
+            }
+        }
+
+    monkeypatch.setattr(config_loader, "init_service", lambda _config: None)
+    monkeypatch.setattr(config_loader, "get_server_config", get_server_config)
+    result = asyncio.run(
+        config_loader.get_config_from_api_async(
+            {
+                "manager-api": {"url": "http://manager", "secret": "manager-api-secret"},
+                "server": {
+                    "ip": "0.0.0.0",
+                    "port": 8000,
+                    "http_port": 8003,
+                    "vision_explain": "http://server/vision",
+                    "auth_key": "local-auth-key",
+                    "mqtt_gateway": None,
+                    "mqtt_signature_key": None,
+                },
+            }
+        )
+    )
+
+    assert result["server"]["mqtt_gateway"] == "mqtt.example:1883"
+    assert result["server"]["mqtt_manager_api"] == "gateway:8007"
+    assert result["server"]["mqtt_signature_key"] == "manager-secret"
+
+def test_explicit_local_mqtt_endpoint_overrides_manager(monkeypatch):
+    async def get_server_config():
+        return {"server": {"mqtt_gateway": "manager:1883", "auth": {"enabled": False}}}
+
+    monkeypatch.setattr(config_loader, "init_service", lambda _config: None)
+    monkeypatch.setattr(config_loader, "get_server_config", get_server_config)
+    result = asyncio.run(
+        config_loader.get_config_from_api_async(
+            {
+                "manager-api": {"url": "http://manager", "secret": "manager-api-secret"},
+                "server": {
+                    "ip": "0.0.0.0",
+                    "port": 8000,
+                    "http_port": 8003,
+                    "mqtt_gateway": "local:1883",
+                    "mqtt_signature_key": "local-key",
+                },
+            }
+        )
+    )
+
+    assert result["server"]["mqtt_gateway"] == "local:1883"
+    assert result["server"]["mqtt_signature_key"] == "local-key"
+
 
 
 def test_merge_simple_override():

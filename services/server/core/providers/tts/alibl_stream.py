@@ -365,7 +365,14 @@ class TTSProvider(TTSProviderBase):
                                     original_text = output.get("original_text")
                                     self.tts_text = self._restore_original_text(original_text)
                                     logger.bind(tag=TAG).debug(f"句子语音生成开始: {self.tts_text}")
-                                    self.tts_audio_queue.put((SentenceType.FIRST, [], self.tts_text))
+                                    self.tts_audio_queue.put(
+                                        (
+                                            SentenceType.FIRST,
+                                            [],
+                                            self.tts_text,
+                                            getattr(self, "current_sentence_id", None),
+                                        )
+                                    )
                                 elif output.get("type") == "sentence-end":
                                     logger.bind(tag=TAG).info(f"句子语音生成成功： {self.tts_text}")
                             elif event == "task-finished":

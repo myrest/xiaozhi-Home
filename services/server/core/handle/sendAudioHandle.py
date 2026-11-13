@@ -18,11 +18,14 @@ AUDIO_FRAME_DURATION = 60
 PRE_BUFFER_COUNT = 5
 
 
-async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text, sentence_id=None):
-    # 跳过旧句子残留音频
-    if sentence_id is not None and sentence_id != conn.sentence_id:
+async def sendAudioMessage(
+    conn: "ConnectionHandler", sentenceType, audios, text, sentence_id=None
+):
+    expected_sentence_id = (
+        conn.sentence_id if sentence_id is None else sentence_id
+    )
+    if expected_sentence_id != conn.sentence_id:
         return
-
     if conn.tts.tts_audio_first_sentence:
         conn.logger.bind(tag=TAG).info(f"发送第一段语音: {text}")
         conn.tts.tts_audio_first_sentence = False
@@ -33,16 +36,31 @@ async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text
             hasattr(conn, "audio_rate_controller")
             and conn.audio_rate_controller
             and getattr(conn, "audio_flow_control", {}).get("sentence_id")
-            == conn.sentence_id
+            == expected_sentence_id
         ):
             conn.audio_rate_controller.add_message(
-                lambda: send_tts_message(conn, "sentence_start", text)
+                lambda: send_tts_message(
+                    conn,
+                    "sentence_start",
+                    text,
+                    expected_sentence_id=expected_sentence_id,
+                )
             )
         else:
-            # 新句子或流控器未初始化，立即发送
-            await send_tts_message(conn, "sentence_start", text)
+            await send_tts_message(
+                conn,
+                "sentence_start",
+                text,
+                expected_sentence_id=expected_sentence_id,
+            )
 
-    await sendAudio(conn, audios)
+    if expected_sentence_id != conn.sentence_id:
+        return
+    await sendAudio(
+        conn, audios, expected_sentence_id=expected_sentence_id
+    )
+    if expected_sentence_id != conn.sentence_id:
+        return
     # 发送句子开始消息
     if sentenceType is not SentenceType.MIDDLE:
         conn.logger.bind(tag=TAG).info(f"发送音频消息: {sentenceType}, {text}")
@@ -50,8 +68,13 @@ async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text
     # 发送结束消息（如果是最后一个文本）
     # 通话需要维持speaking状态
     if not conn.calling and sentenceType == SentenceType.LAST:
-        await send_tts_message(conn, "stop", None)
-        if conn.close_after_chat:
+        await send_tts_message(
+            conn,
+            "stop",
+            None,
+            expected_sentence_id=expected_sentence_id,
+        )
+        if expected_sentence_id == conn.sentence_id and conn.close_after_chat:
             await conn.close()
 
 
@@ -117,7 +140,11 @@ async def _send_to_mqtt_gateway(
 
 
 async def sendAudio(
-    conn: "ConnectionHandler", audios, frame_duration=AUDIO_FRAME_DURATION
+    conn: "ConnectionHandler",
+    audios,
+    frame_duration=AUDIO_FRAME_DURATION,
+    *,
+    expected_sentence_id=None,
 ):
     """
     发送音频包，使用 AudioRateController 进行精确的流量控制
@@ -125,8 +152,14 @@ async def sendAudio(
     Args:
         conn: 连接对象
         audios: 单个opus包(bytes) 或 opus包列表
-        frame_duration: 帧时长（毫秒），默认使用全局常量AUDIO_FRAME_DURATION
+        frame_duration: 帧时长（毫秒），默认使用全局常量
+        expected_sentence_id: Reject queued output after another output owns the connection.
     """
+    if (
+        expected_sentence_id is not None
+        and expected_sentence_id != conn.sentence_id
+    ):
+        return
     if audios is None or len(audios) == 0:
         return
 
@@ -137,6 +170,11 @@ async def sendAudio(
     rate_controller, flow_control = _get_or_create_rate_controller(
         conn, frame_duration, is_single_packet, send_delay_ms
     )
+    if (
+        expected_sentence_id is not None
+        and flow_control["sentence_id"] != expected_sentence_id
+    ):
+        return
 
     # 统一转换为列表处理
     audio_list = [audios] if is_single_packet else audios
@@ -145,7 +183,6 @@ async def sendAudio(
     await _send_audio_with_rate_control(
         conn, audio_list, rate_controller, flow_control, send_delay_ms
     )
-
 
 def _get_or_create_rate_controller(
     conn: "ConnectionHandler", frame_duration, is_single_packet, send_delay_ms=0
@@ -177,7 +214,6 @@ def _get_or_create_rate_controller(
             or rate_controller.pending_send_task.done()
         ):
             need_reset = True
-        # 当sentence_id 变化，需要重置
         elif (
             getattr(conn, "audio_flow_control", {}).get("sentence_id")
             != conn.sentence_id
@@ -208,6 +244,9 @@ def _get_or_create_rate_controller(
     return conn.audio_rate_controller, conn.audio_flow_control
 
 
+def _flow_is_current(conn, flow_control):
+    return flow_control["sentence_id"] == conn.sentence_id
+
 def _start_background_sender(conn: "ConnectionHandler", rate_controller, flow_control):
     """
     启动后台发送循环任务
@@ -219,14 +258,12 @@ def _start_background_sender(conn: "ConnectionHandler", rate_controller, flow_co
     """
 
     async def send_callback(packet):
-        # 检查是否应该中止
-        if conn.client_abort:
-            raise asyncio.CancelledError("客户端已中止")
+        if conn.client_abort or not _flow_is_current(conn, flow_control):
+            raise asyncio.CancelledError("audio generation was superseded")
 
         conn.last_activity_time = time.time() * 1000
         await _do_send_audio(conn, packet, flow_control)
 
-    # 使用 start_sending 启动后台循环
     rate_controller.start_sending(send_callback)
 
 
@@ -244,7 +281,7 @@ async def _send_audio_with_rate_control(
         send_delay_ms: 自定义发送间隔（毫秒）。
     """
     for packet in audio_list:
-        if conn.client_abort:
+        if conn.client_abort or not _flow_is_current(conn, flow_control):
             return
 
         conn.last_activity_time = time.time() * 1000
@@ -258,8 +295,6 @@ async def _send_audio_with_rate_control(
                 await _do_send_audio(conn, packet, flow_control)
             else:
                 rate_controller.add_audio(packet)
-
-
 async def _do_send_audio(conn: "ConnectionHandler", opus_packet, flow_control):
     """
     执行实际的音频发送
@@ -281,9 +316,23 @@ async def _do_send_audio(conn: "ConnectionHandler", opus_packet, flow_control):
     flow_control["sequence"] = sequence + 1
 
 
-async def send_tts_message(conn: "ConnectionHandler", state, text=None):
+async def send_tts_message(
+    conn: "ConnectionHandler",
+    state,
+    text=None,
+    *,
+    expected_sentence_id=None,
+):
     """发送 TTS 状态消息"""
     if text is None and state == "sentence_start":
+        return
+    if expected_sentence_id is None:
+        expected_sentence_id = conn.sentence_id
+
+    def still_current():
+        return expected_sentence_id == conn.sentence_id
+
+    if not still_current():
         return
     message = {"type": "tts", "state": state, "session_id": conn.session_id}
     if text is not None:
@@ -291,8 +340,6 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
 
     # TTS播放结束
     if state == "stop":
-        # 保存当前的 sentence_id，用于后续判断是否是当前轮次
-        current_sentence_id = conn.sentence_id
         # 播放提示音
         tts_notify = conn.config.get("enable_stop_tts_notify", False)
         if tts_notify:
@@ -300,12 +347,17 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
                 "stop_tts_notify_voice", "config/assets/tts_notify.mp3"
             )
             audios = await audio_to_data(stop_tts_notify_voice, is_opus=True)
-            await sendAudio(conn, audios)
+            if not still_current():
+                return
+            await sendAudio(
+                conn,
+                audios,
+                expected_sentence_id=expected_sentence_id,
+            )
         # 等待所有音频包发送完成
         await _wait_for_audio_completion(conn)
 
-        # 检查是否是当前轮次
-        if current_sentence_id != conn.sentence_id:
+        if not still_current():
             return
 
         # 停止音频发送循环（仅在流控器已初始化时调用）
@@ -313,8 +365,8 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
             conn.audio_rate_controller.stop_sending()
         conn.clearSpeakStatus()
 
-    # 发送消息到客户端
-    await conn.websocket.send(json.dumps(message))
+    if still_current():
+        await conn.websocket.send(json.dumps(message))
 
 
 async def send_stt_message(conn: "ConnectionHandler", text):

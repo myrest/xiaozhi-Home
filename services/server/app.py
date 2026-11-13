@@ -2,17 +2,18 @@ import sys
 import uuid
 import signal
 import asyncio
+import os
+from pathlib import Path
 from aioconsole import ainput
 from config.settings import load_config
 from config.logger import setup_logging
 from core.utils.util import get_local_ip, validate_mcp_endpoint
+from core.utils.gc_manager import get_gc_manager
 from core.http_server import SimpleHttpServer
 from core.websocket_server import WebSocketServer
 from core.utils.util import check_ffmpeg_installed
-from core.utils.gc_manager import get_gc_manager
 
 TAG = __name__
-logger = setup_logging()
 
 
 async def wait_for_exit() -> None:
@@ -46,6 +47,7 @@ async def monitor_stdin():
 async def main():
     check_ffmpeg_installed()
     config = await load_config()
+    logger = setup_logging(config)
 
     # auth_key优先级：配置文件server.auth_key > manager-api.secret > 自动生成
     # auth_key用于jwt认证，比如视觉分析接口的jwt认证、ota接口的token生成与websocket认证
@@ -60,6 +62,16 @@ async def main():
             auth_key = str(uuid.uuid4().hex)
     
     config["server"]["auth_key"] = auth_key
+    reminder_token_file = os.environ.get("XIAOZHI_REMINDER_TOKEN_FILE")
+    notification_service = None
+    notification_task = None
+    if reminder_token_file:
+        token = Path(reminder_token_file).read_text(encoding="utf-8").strip()
+        if not token:
+            raise RuntimeError("The reminder notification token is empty")
+        from core.notifications.service import NotificationService
+
+        notification_service = NotificationService(token, config)
 
     # 添加 stdin 监控任务
     stdin_task = asyncio.create_task(monitor_stdin())
@@ -68,11 +80,19 @@ async def main():
     gc_manager = get_gc_manager(interval_seconds=300)
     await gc_manager.start()
 
+
     # 启动 WebSocket 服务器
     ws_server = WebSocketServer(config)
+    ws_server.notification_service = notification_service
+    if notification_service is not None:
+        notification_task = asyncio.create_task(notification_service.start())
     ws_task = asyncio.create_task(ws_server.start())
-    # 启动 Simple http 服务器
-    ota_server = SimpleHttpServer(config)
+    ota_server = SimpleHttpServer(
+        config,
+        reminder_audio_assets=(
+            notification_service.assets if notification_service is not None else None
+        ),
+    )
     ota_task = asyncio.create_task(ota_server.start())
 
     read_config_from_api = config.get("read_config_from_api", False)
@@ -130,15 +150,16 @@ async def main():
         # 停止全局GC管理器
         await gc_manager.stop()
 
-        # 取消所有任务（关键修复点）
         stdin_task.cancel()
         ws_task.cancel()
-        if ota_task:
-            ota_task.cancel()
+        tasks = [stdin_task, ws_task, ota_task]
+        if notification_task:
+            notification_task.cancel()
+            tasks.append(notification_task)
 
         # 等待任务终止（必须加超时）
         await asyncio.wait(
-            [stdin_task, ws_task, ota_task] if ota_task else [stdin_task, ws_task],
+            tasks,
             timeout=3.0,
             return_when=asyncio.ALL_COMPLETED,
         )

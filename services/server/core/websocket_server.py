@@ -44,6 +44,7 @@ class WebSocketServer:
         self.config = config
         self.logger = setup_logging(config)
         self.config_lock = asyncio.Lock()
+        self.notification_service = None
         modules = initialize_modules(
             self.logger,
             self.config,

@@ -441,7 +441,12 @@ class TTSProvider(TTSProviderBase):
                             if event_name == "SynthesisStarted":
                                 logger.bind(tag=TAG).debug("TTS合成已启动")
                                 self.tts_audio_queue.put(
-                                    (SentenceType.FIRST, [], None)
+                                    (
+                                        SentenceType.FIRST,
+                                        [],
+                                        None,
+                                        getattr(self, "current_sentence_id", None),
+                                    )
                                 )
                             elif event_name == "SentenceEnd":
                                 # 发送缓存的数据
@@ -451,7 +456,12 @@ class TTSProvider(TTSProviderBase):
                                         f"句子语音生成成功： {tts_text}"
                                     )
                                     self.tts_audio_queue.put(
-                                        (SentenceType.FIRST, [], tts_text)
+                                        (
+                                            SentenceType.FIRST,
+                                            [],
+                                            tts_text,
+                                            getattr(self, "current_sentence_id", None),
+                                        )
                                     )
                                     self.clear_tts_text(self.conn.sentence_id)
                             elif event_name == "SynthesisCompleted":

@@ -35,9 +35,9 @@ server:
     # 如果属于白名单内的设备，不校验token，直接放行
     allowed_devices:
       - "11:22:33:44:55:66"
- # MQTT网关配置，用于通过OTA下发到设备，根据mqtt_gateway的.env文件配置，格式为host:port
+  # MQTT Gateway endpoint sent to ESP32 via OTA; use the endpoint format supported by its firmware.
   mqtt_gateway: null
-  # MQTT签名密钥，用于生成MQTT连接密码，根据mqtt_gateway的.env文件配置
+  # Shared key for MQTT credential signing and authenticated Gateway management requests.
   mqtt_signature_key: null
   # UDP网关配置
   udp_gateway: null

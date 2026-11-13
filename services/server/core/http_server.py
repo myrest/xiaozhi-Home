@@ -8,11 +8,12 @@ TAG = __name__
 
 
 class SimpleHttpServer:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, reminder_audio_assets=None):
         self.config = config
         self.logger = setup_logging()
         self.ota_handler = OTAHandler(config)
         self.vision_handler = VisionHandler(config)
+        self.reminder_audio_assets = reminder_audio_assets
 
     def _get_websocket_url(self, local_ip: str, port: int) -> str:
         """获取websocket地址
@@ -41,6 +42,11 @@ class SimpleHttpServer:
 
             if port:
                 app = web.Application()
+                if self.reminder_audio_assets is not None:
+                    app.router.add_get(
+                        "/reminders/audio/{reminder_id}/{revision}.ogg",
+                        self.reminder_audio_assets.handle_get,
+                    )
 
                 if not read_config_from_api:
                     # 如果没有开启智控台，只是单模块运行，就需要再添加简单OTA接口，用于下发websocket接口

@@ -1,0 +1,11 @@
+FROM python:3.13-alpine3.22@sha256:7f7ee17311e0273954ffe76a7b84a2d8c8ecf16f9992e780e4d46c86175df431
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1 TZ=Asia/Taipei
+RUN apk add --no-cache tzdata
+WORKDIR /app
+COPY services/mcp/requirements.lock.txt ./requirements.lock.txt
+RUN pip install --no-cache-dir -r requirements.lock.txt
+COPY services/mcp/bedtime_mcp ./bedtime_mcp
+COPY services/mcp/reminder_mcp ./reminder_mcp
+RUN mkdir -p /data && chown 1000:1000 /data
+USER 1000:1000
+CMD ["python", "-m", "reminder_mcp.server"]

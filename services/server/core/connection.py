@@ -213,6 +213,7 @@ class ConnectionHandler:
         # 标记当前是否为来电接听模式
         self.incoming_call = None
 
+
     async def handle_connection(self, ws: websockets.ServerConnection):
         try:
             # 获取运行中的事件循环（必须在异步上下文中）
@@ -1065,7 +1066,12 @@ class ConnectionHandler:
         # 更新系统prompt至上下文
         self.dialogue.update_system_message(self.prompt)
 
-    def chat(self, query, depth=0):
+    def chat(self, query, depth=0, expected_sentence_id=None):
+        if (
+            expected_sentence_id is not None
+            and expected_sentence_id != self.sentence_id
+        ):
+            return False
         # 保存当前任务的sentence_id到局部变量，避免被新任务覆盖
         current_sentence_id = None
 
@@ -1172,7 +1178,7 @@ class ConnectionHandler:
         emotion_flag = True
         try:
             for response in llm_responses:
-                if self.client_abort:
+                if self.client_abort or current_sentence_id != self.sentence_id:
                     break
                 if self.intent_type == "function_call" and functions is not None:
                     content, tools_call = response
@@ -1237,6 +1243,8 @@ class ConnectionHandler:
                             )
                         )
         except Exception as e:
+            if self.client_abort or current_sentence_id != self.sentence_id:
+                return False
             self.logger.bind(tag=TAG).error(f"LLM stream processing error: {e}")
             self.tts.tts_text_queue.put(
                 TTSMessageDTO(
@@ -1255,6 +1263,8 @@ class ConnectionHandler:
                     )
                 )
             return
+        if self.client_abort or current_sentence_id != self.sentence_id:
+            return False
         # 处理function call
         if tool_call_flag:
             bHasError = False
@@ -1358,6 +1368,8 @@ class ConnectionHandler:
                 # 收集所有工具调用的 Future
                 futures_with_data = []
                 for tool_call_data in tool_calls_list:
+                    if current_sentence_id != self.sentence_id or self.client_abort:
+                        return False
                     self.logger.bind(tag=TAG).debug(
                         f"function_name={tool_call_data['name']}, function_id={tool_call_data['id']}, function_arguments={tool_call_data['arguments']}"
                     )
@@ -1399,9 +1411,18 @@ class ConnectionHandler:
                         enqueue_tool_report(self, tool_call_data['name'], tool_input, str(e), report_tool_call=False)
 
                 # 统一处理工具调用结果
+                if self.client_abort or current_sentence_id != self.sentence_id:
+                    return False
                 if tool_results:
-                    self._handle_function_result(tool_results, depth=depth, streamed_text=streamed_text)
+                    self._handle_function_result(
+                        tool_results,
+                        depth=depth,
+                        streamed_text=streamed_text,
+                        expected_sentence_id=current_sentence_id,
+                    )
 
+        if self.client_abort or current_sentence_id != self.sentence_id:
+            return False
         # 存储对话内容
         if len(response_message) > 0:
             text_buff = "".join(response_message)
@@ -1435,11 +1456,23 @@ class ConnectionHandler:
         }
         return {"thought_signatures": thought_signatures} if thought_signatures else None
 
-    def _handle_function_result(self, tool_results, depth, streamed_text=""):
+    def _handle_function_result(
+        self, tool_results, depth, streamed_text="", expected_sentence_id=None
+    ):
+        if self.client_abort or (
+            expected_sentence_id is not None
+            and expected_sentence_id != self.sentence_id
+        ):
+            return
         need_llm_tools = []
         record_tools = []
 
         for result, tool_call_data in tool_results:
+            if self.client_abort or (
+                expected_sentence_id is not None
+                and expected_sentence_id != self.sentence_id
+            ):
+                return
             if result.action in [
                 Action.RESPONSE,
                 Action.NOTFOUND,
@@ -1462,6 +1495,11 @@ class ConnectionHandler:
                 pass
 
         # Action.RECORD：写入完整工具调用链（assistant(tool_calls) → tool(result) → assistant(response)）
+        if self.client_abort or (
+            expected_sentence_id is not None
+            and expected_sentence_id != self.sentence_id
+        ):
+            return
         # 模型从历史中学到工具调用模式，不额外调用LLM
         if record_tools:
             # 构造 assistant 消息（含 tool_calls），记录"模型调用了哪些工具"
@@ -1513,6 +1551,11 @@ class ConnectionHandler:
             if response_parts:
                 self.dialogue.put(Message(role="assistant", content="，".join(response_parts)))
 
+        if self.client_abort or (
+            expected_sentence_id is not None
+            and expected_sentence_id != self.sentence_id
+        ):
+            return
         if need_llm_tools:
             all_tool_calls = [
                 {
@@ -1553,7 +1596,11 @@ class ConnectionHandler:
                         )
                     )
 
-            self.chat(None, depth=depth + 1)
+            self.chat(
+                None,
+                depth=depth + 1,
+                expected_sentence_id=expected_sentence_id,
+            )
 
     def _report_worker(self):
         """聊天记录上报工作线程"""
